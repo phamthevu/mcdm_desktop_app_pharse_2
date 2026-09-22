@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QFileDialog,
     QMessageBox,
+    QDialog, QVBoxLayout, QTextEdit, QPushButton, QLabel,
 )
 
 from core.models import Expert, ProjectConfig, config_from_dict, config_to_dict
@@ -44,6 +45,7 @@ class MainWindow(QMainWindow):
         self.tab_config.project_created.connect(self.create_project)
 
         self._build_menu()
+        self.statusBar().showMessage("Ready — create or open a project")
         self._update_window_state()
 
     # ------------------------------------------------------------------
@@ -82,6 +84,10 @@ class MainWindow(QMainWindow):
         self.action_merge.triggered.connect(self.merge_projects)
         file_menu.addAction(self.action_merge)
 
+        self.action_info = QAction("Project Information...", self)
+        self.action_info.triggered.connect(self.show_project_information)
+        file_menu.addAction(self.action_info)
+
         file_menu.addSeparator()
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
@@ -93,6 +99,7 @@ class MainWindow(QMainWindow):
         self.action_close.setEnabled(opened)
         self.action_export.setEnabled(opened)
         self.action_merge.setEnabled(opened)
+        self.action_info.setEnabled(opened)
         if opened:
             meta = self.project_db.get_meta()
             self.project_name = meta["project_name"] if meta else self.project_name
@@ -188,12 +195,13 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(1)
             self._update_window_state()
 
-            if show_message:
-                QMessageBox.information(
-                    self,
-                    "Project Created",
-                    f"Project created successfully:\n\n{self.project_path}",
-                )
+            self.statusBar().showMessage(f"Opened: {self.project_name} — {self.project_path}", 8000)
+            title = "Project Created" if show_message else "Project Opened"
+            lead = "Project created and opened successfully." if show_message else "Project opened successfully."
+            QMessageBox.information(
+                self, title,
+                f"{lead}\n\nProject: {self.project_name}\nFile: {self.project_path}"
+            )
         except Exception as exc:
             QMessageBox.critical(
                 self, "Open Project Failed", f"Could not open project:\n\n{exc}"
@@ -205,10 +213,26 @@ class MainWindow(QMainWindow):
         try:
             self.project_db.conn.commit()
             self._update_window_state()
+            from datetime import datetime
+            saved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.statusBar().showMessage(f"Saved successfully at {saved_at}", 8000)
+            QMessageBox.information(
+                self, "Project Saved",
+                f"Project saved successfully.\n\nProject: {self.project_name}\nFile: {self.project_path}\nSaved at: {saved_at}"
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Save Failed", str(exc))
 
     def close_project(self):
+        if self.project_db:
+            answer = QMessageBox.question(
+                self, "Close Project",
+                f"Close project '{self.project_name}'?\n\nAll saved database changes are already persisted.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         if not self._close_current_if_needed(force=True):
             return
         self._reset_project_ui()
@@ -238,6 +262,7 @@ class MainWindow(QMainWindow):
         self.tabs.removeTab(0)
         self.tabs.insertTab(0, self.tab_config, "1. Configuration")
         self._update_window_state()
+        self.statusBar().showMessage("Project closed", 5000)
 
     def _refresh_mutable_project_data(self):
         if not self.project_db:
@@ -274,10 +299,12 @@ class MainWindow(QMainWindow):
         incompatible = []
         for path in paths:
             try:
-                if self.project_db.is_merge_compatible(path):
+                report = self.project_db.compare_merge_config(path)
+                if report["compatible"]:
                     compatible.append(path)
                 else:
-                    incompatible.append(Path(path).name)
+                    details = "\n    ".join(report.get("differences") or ["Config hash differs."])
+                    incompatible.append(f"{Path(path).name}\n    {details}")
             except Exception as exc:
                 incompatible.append(f"{Path(path).name}: {exc}")
 
@@ -314,8 +341,46 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "Merge Complete", f"Projects merged successfully.\n\n{summary}"
             )
+            self.statusBar().showMessage("Merge completed successfully", 8000)
         except Exception as exc:
             QMessageBox.critical(self, "Merge Failed", str(exc))
+
+    def show_project_information(self):
+        if not self.project_db:
+            return
+        meta = self.project_db.get_meta() or {}
+        respondents = self.project_db.get_respondents()
+        responses = self.project_db.get_all_responses()
+        history = self.project_db.get_merge_history()
+        history_text = "\n".join(
+            f"- {h.get('source_project_name')} | {h.get('imported_count')} response(s) | {h.get('merged_at')} | {h.get('source_file')}"
+            for h in history
+        ) or "No merge history."
+        text = (
+            f"Project Name: {meta.get('project_name', '')}\n"
+            f"Project ID: {meta.get('project_id', '')}\n"
+            f"Project Type: {meta.get('project_type', '')}\n"
+            f"File: {self.project_path}\n"
+            f"Created: {meta.get('created_at', '')}\n"
+            f"Modified: {meta.get('modified_at', '')}\n"
+            f"Config Hash: {meta.get('config_hash', '')}\n"
+            f"Respondents: {len(respondents)}\n"
+            f"Responses: {len(responses)}\n\n"
+            f"MERGE HISTORY\n{history_text}"
+        )
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Project Information")
+        dlg.resize(760, 520)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("Project metadata and merge audit history"))
+        box = QTextEdit()
+        box.setReadOnly(True)
+        box.setPlainText(text)
+        layout.addWidget(box)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+        dlg.exec()
 
     def closeEvent(self, event):
         if self.project_db:

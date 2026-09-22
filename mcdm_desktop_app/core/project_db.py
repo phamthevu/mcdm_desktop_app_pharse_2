@@ -435,6 +435,55 @@ class ProjectDB:
                 (idx, row["id"]),
             )
 
+
+    def get_merge_history(self) -> List[Dict[str, Any]]:
+        self._require_open()
+        rows = self.conn.execute(
+            "SELECT * FROM merge_log ORDER BY id DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def compare_merge_config(self, other_path: str) -> Dict[str, Any]:
+        """Return merge compatibility plus human-readable configuration differences."""
+        self._require_open()
+        other = sqlite3.connect(other_path)
+        other.row_factory = sqlite3.Row
+        try:
+            src = other.execute("SELECT * FROM project_meta LIMIT 1").fetchone()
+            target = self.get_meta()
+            if not src or not target:
+                return {"compatible": False, "differences": ["Project metadata is missing."]}
+            differences = []
+            if src["project_type"] != target["project_type"]:
+                differences.append(
+                    f"project_type: current={target['project_type']!r}, source={src['project_type']!r}"
+                )
+            try:
+                left = canonical_config_dict(json.loads(target["config_json"]))
+                right = canonical_config_dict(json.loads(src["config_json"]))
+                keys = sorted(set(left) | set(right))
+                for key in keys:
+                    if left.get(key) != right.get(key):
+                        lv = json.dumps(left.get(key), ensure_ascii=False)
+                        rv = json.dumps(right.get(key), ensure_ascii=False)
+                        if len(lv) > 220: lv = lv[:217] + "..."
+                        if len(rv) > 220: rv = rv[:217] + "..."
+                        differences.append(f"{key}: current={lv}; source={rv}")
+            except Exception as exc:
+                differences.append(f"Could not compare config JSON: {exc}")
+            compatible = (src["project_type"] == target["project_type"] and
+                          src["config_hash"] == target["config_hash"] and not differences)
+            return {
+                "compatible": compatible,
+                "differences": differences,
+                "source_project_id": src["project_id"],
+                "source_project_name": src["project_name"],
+                "source_config_hash": src["config_hash"],
+                "target_config_hash": target["config_hash"],
+            }
+        finally:
+            other.close()
+
     def is_merge_compatible(self, other_path: str) -> bool:
         self._require_open()
         other = sqlite3.connect(other_path)
