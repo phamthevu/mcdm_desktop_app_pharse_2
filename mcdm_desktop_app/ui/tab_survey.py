@@ -224,6 +224,7 @@ class TabSurvey(QWidget):
                     "code_matrix": payload.get("code_matrix", []),
                     "value_matrix": payload.get("value_matrix", []),
                     "expert_name": row.get("full_name") or key,
+                    "username": row.get("username", ""),
                     "respondent_id": key,
                     "answer_id": f"Ans_{int(row['display_index']):02d}",
                     "submitted_at": row.get("submitted_at", ""),
@@ -269,6 +270,51 @@ class TabSurvey(QWidget):
             self.lock_matrix(False)
 
         self.update_progress_counter()
+
+    def refresh_respondents_from_db(self):
+        """Reload mutable respondent accounts without changing immutable research config."""
+        if not self.project_db or self.config.expert_auth_mode != "Account":
+            return
+        self.config.experts = [
+            Expert(
+                name=str(r.get("full_name", "")),
+                username=str(r.get("username", "")),
+                password=str(r.get("password", "")),
+                respondent_id=str(r.get("respondent_id", "")),
+                organization=str(r.get("organization", "")),
+            ) for r in self.project_db.get_respondents()
+        ]
+        self.cb_experts.blockSignals(True)
+        self.cb_experts.clear()
+        for exp in self.config.experts:
+            self.cb_experts.addItem(f"{exp.name} ({exp.username})", userData=exp)
+        self.cb_experts.blockSignals(False)
+        self.on_expert_selected_change()
+        self.reload_from_project_db()
+
+    def open_response_for_edit(self, respondent_id: str):
+        """Select a respondent and load its persisted evaluation into the matrix."""
+        self.refresh_respondents_from_db()
+        for i in range(self.cb_experts.count()):
+            exp = self.cb_experts.itemData(i)
+            if exp and (exp.respondent_id or exp.username) == respondent_id:
+                self.cb_experts.setCurrentIndex(i)
+                break
+        row = self.project_db.get_response_by_respondent(respondent_id) if self.project_db else None
+        if not row:
+            return
+        try:
+            payload = __import__("json").loads(row["response_json"])
+            saved = payload.get("code_matrix", [])
+            for (r, c), widget in self.cell_widgets.items():
+                if r < len(saved) and c < len(saved[r]):
+                    widget.set_value_by_code(saved[r][c])
+            self.is_authenticated = True
+            self.lock_matrix(False)
+            self.lbl_auth_status.setText("🔓 Loaded for editing")
+            self.lbl_auth_status.setStyleSheet("font-weight:bold; color:#198754; font-size:12px;")
+        except Exception as exc:
+            QMessageBox.critical(self, "Open Response", str(exc))
 
     def populate_reference_tables(self):
         """Đưa trực tiếp danh sách Factors và Scales vào 2 bảng bên phải."""

@@ -231,6 +231,52 @@ class ProjectDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+
+    def add_respondent(self, username: str, password: str = "123", full_name: str = "", organization: str = "", respondent_id: Optional[str] = None) -> str:
+        self._require_open()
+        respondent_id = str(respondent_id or uuid.uuid4().hex)
+        username = str(username or respondent_id).strip()
+        if not username:
+            raise ValueError("Username is required.")
+        now = datetime.now().isoformat(timespec="seconds")
+        self.conn.execute(
+            """INSERT INTO respondents
+               (respondent_id, username, password, full_name, organization, status, created_at)
+               VALUES (?, ?, ?, ?, ?, 'Pending', ?)""",
+            (respondent_id, username, str(password), str(full_name), str(organization), now),
+        )
+        self._touch()
+        self.conn.commit()
+        return respondent_id
+
+    def update_respondent(self, respondent_id: str, username: str, password: str, full_name: str, organization: str):
+        self._require_open()
+        cur = self.conn.execute(
+            """UPDATE respondents SET username=?, password=?, full_name=?, organization=?
+               WHERE respondent_id=?""",
+            (str(username).strip(), str(password), str(full_name), str(organization), respondent_id),
+        )
+        if cur.rowcount == 0:
+            raise ValueError("Respondent not found.")
+        self._touch()
+        self.conn.commit()
+
+    def delete_respondent(self, respondent_id: str):
+        self._require_open()
+        has_response = self.conn.execute(
+            "SELECT 1 FROM responses WHERE respondent_id=? LIMIT 1", (respondent_id,)
+        ).fetchone()
+        if has_response:
+            raise ValueError("This respondent already has a response. Delete the response first.")
+        self.conn.execute("DELETE FROM respondents WHERE respondent_id=?", (respondent_id,))
+        self._touch()
+        self.conn.commit()
+
+    def get_response(self, response_id: int) -> Optional[Dict[str, Any]]:
+        self._require_open()
+        row = self.conn.execute("SELECT * FROM responses WHERE id=?", (response_id,)).fetchone()
+        return dict(row) if row else None
+
     def append_accounts(self, new_accounts: Iterable[Dict[str, Any]]) -> int:
         """Add respondents only. This never modifies project configuration."""
         self._require_open()
@@ -353,7 +399,7 @@ class ProjectDB:
         rows = self.conn.execute(
             """
             SELECT r.id, r.display_index, r.respondent_id,
-                   res.full_name, res.organization,
+                   res.full_name, res.username, res.organization,
                    r.source_project_id, r.source_project_name,
                    r.source_response_id, r.source_file,
                    r.submitted_at, r.merged_at, r.response_json

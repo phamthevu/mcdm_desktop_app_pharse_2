@@ -12,6 +12,7 @@ from core.models import Expert, ProjectConfig, config_from_dict, config_to_dict
 from core.project_db import ProjectDB
 from ui.tab_config import TabConfig
 from ui.tab_survey import TabSurvey
+from ui.tab_data_manager import TabDataManager
 
 
 class MainWindow(QMainWindow):
@@ -31,9 +32,14 @@ class MainWindow(QMainWindow):
 
         self.tab_config = TabConfig()
         self.tab_survey = TabSurvey()
+        self.tab_data = TabDataManager()
         self.tabs.addTab(self.tab_config, "1. Configuration")
         self.tabs.addTab(self.tab_survey, "2. Survey Matrix")
+        self.tabs.addTab(self.tab_data, "3. Data Manager")
         self.tabs.setTabEnabled(1, False)
+        self.tabs.setTabEnabled(2, False)
+        self.tab_data.edit_response_requested.connect(self._edit_response_from_manager)
+        self.tab_data.respondents_changed.connect(self._refresh_mutable_project_data)
 
         self.tab_config.project_created.connect(self.create_project)
 
@@ -105,6 +111,8 @@ class MainWindow(QMainWindow):
         self.tabs.insertTab(0, self.tab_config, "1. Configuration")
         self.tabs.setCurrentIndex(0)
         self.tabs.setTabEnabled(1, False)
+        self.tabs.setTabEnabled(2, False)
+        self.tab_data.clear_project()
         self._update_window_state()
 
     def open_project_dialog(self):
@@ -174,7 +182,9 @@ class MainWindow(QMainWindow):
 
             self.tab_config.load_locked_project(config)
             self.tab_survey.load_project(config, db)
+            self.tab_data.load_project(db)
             self.tabs.setTabEnabled(1, True)
+            self.tabs.setTabEnabled(2, True)
             self.tabs.setCurrentIndex(1)
             self._update_window_state()
 
@@ -220,12 +230,24 @@ class MainWindow(QMainWindow):
 
     def _reset_project_ui(self):
         self.tabs.setTabEnabled(1, False)
+        self.tabs.setTabEnabled(2, False)
+        self.tab_data.clear_project()
         self.tabs.setCurrentIndex(0)
         self.tab_config = TabConfig()
         self.tab_config.project_created.connect(self.create_project)
         self.tabs.removeTab(0)
         self.tabs.insertTab(0, self.tab_config, "1. Configuration")
         self._update_window_state()
+
+    def _refresh_mutable_project_data(self):
+        if not self.project_db:
+            return
+        self.tab_survey.refresh_respondents_from_db()
+        self.tab_data.refresh()
+
+    def _edit_response_from_manager(self, respondent_id: str):
+        self.tab_survey.open_response_for_edit(respondent_id)
+        self.tabs.setCurrentWidget(self.tab_survey)
 
     # ------------------------------------------------------------------
     # Export / merge
@@ -284,6 +306,7 @@ class MainWindow(QMainWindow):
         try:
             logs = self.project_db.merge_other_projects(compatible)
             self.tab_survey.reload_from_project_db()
+            self.tab_data.refresh()
             summary = "\n".join(
                 f"{item['project_name']}: {item['count']} response(s)"
                 for item in logs
