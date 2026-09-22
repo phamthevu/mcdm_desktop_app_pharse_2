@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QInputDialog
 )
 from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtGui import QColor, QBrush, QFont
+from PyQt6.QtGui import QColor, QBrush, QFont, QDoubleValidator
 from core.models import ProjectConfig, config_to_dict
 from core.excel_handler import parse_config_excel, generate_default_template
 
@@ -68,16 +68,16 @@ class TabConfig(QWidget):
         lay_scale.addWidget(self.rb_continuous, 1, 0, 1, 4)
 
         self.lbl_min = QLabel("Min:")
-        self.spin_min = QDoubleSpinBox()
-        self.spin_min.setRange(-1000, 10000)
-        self.spin_min.setValue(0.0)
-        self.spin_min.valueChanged.connect(self.update_preview_scales)
+        self.spin_min = QLineEdit("0")
+        self.spin_min.setValidator(QDoubleValidator(-1000000000, 1000000000, 8, self))
+        self.spin_min.setPlaceholderText("Enter minimum")
+        self.spin_min.textChanged.connect(self.update_preview_scales)
 
         self.lbl_max = QLabel("Max:")
-        self.spin_max = QDoubleSpinBox()
-        self.spin_max.setRange(-1000, 10000)
-        self.spin_max.setValue(10.0)
-        self.spin_max.valueChanged.connect(self.update_preview_scales)
+        self.spin_max = QLineEdit("10")
+        self.spin_max.setValidator(QDoubleValidator(-1000000000, 1000000000, 8, self))
+        self.spin_max.setPlaceholderText("Enter maximum")
+        self.spin_max.textChanged.connect(self.update_preview_scales)
 
         lay_scale.addWidget(self.lbl_min, 2, 0)
         lay_scale.addWidget(self.spin_min, 2, 1)
@@ -245,8 +245,8 @@ class TabConfig(QWidget):
         self.config.model_type = self.cb_model.currentText()
         self.config.use_z_number = self.chk_z_number.isChecked()
         self.config.scale_type = "Continuous" if self.rb_continuous.isChecked() else "Category"
-        self.config.continuous_min = self.spin_min.value()
-        self.config.continuous_max = self.spin_max.value()
+        self.config.continuous_min = float(self.spin_min.text() or 0)
+        self.config.continuous_max = float(self.spin_max.text() or 10)
         self.config.expert_auth_mode = "Account" if self.rb_expert_account.isChecked() else "Free"
 
         try:
@@ -363,8 +363,8 @@ class TabConfig(QWidget):
             self.table_scales.setColumnCount(3)
             self.table_scales.setHorizontalHeaderLabels(["Scale Type", "Lower Bound (Min)", "Upper Bound (Max)"])
             self.table_scales.setItem(0, 0, QTableWidgetItem("Continuous Scale"))
-            self.table_scales.setItem(0, 1, QTableWidgetItem(str(self.spin_min.value())))
-            self.table_scales.setItem(0, 2, QTableWidgetItem(str(self.spin_max.value())))
+            self.table_scales.setItem(0, 1, QTableWidgetItem(self.spin_min.text()))
+            self.table_scales.setItem(0, 2, QTableWidgetItem(self.spin_max.text()))
             return
 
         if not self.config.use_z_number:
@@ -423,8 +423,8 @@ class TabConfig(QWidget):
         self.chk_z_number.setChecked(config.use_z_number)
         self.rb_continuous.setChecked(config.scale_type == "Continuous")
         self.rb_category.setChecked(config.scale_type != "Continuous")
-        self.spin_min.setValue(config.continuous_min)
-        self.spin_max.setValue(config.continuous_max)
+        self.spin_min.setText(str(config.continuous_min))
+        self.spin_max.setText(str(config.continuous_max))
         self.rb_expert_free.setChecked(config.expert_auth_mode == "Free")
         self.rb_expert_account.setChecked(config.expert_auth_mode != "Free")
         self.txt_file_path.setText("Configuration stored inside project (.mcdm)")
@@ -442,8 +442,8 @@ class TabConfig(QWidget):
         self.chk_z_number.setChecked(False)
         self.rb_category.setChecked(True)
         self.rb_expert_account.setChecked(True)
-        self.spin_min.setValue(0.0)
-        self.spin_max.setValue(10.0)
+        self.spin_min.setText("0")
+        self.spin_max.setText("10")
         self.load_and_preview_default()
 
     def on_start_clicked(self):

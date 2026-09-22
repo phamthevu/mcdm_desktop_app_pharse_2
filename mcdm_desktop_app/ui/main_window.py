@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QFileDialog,
     QMessageBox,
-    QDialog, QVBoxLayout, QTextEdit, QPushButton, QLabel,
+    QDialog, QVBoxLayout, QTextEdit, QPushButton, QLabel, QInputDialog,
 )
 
 from core.models import Expert, ProjectConfig, config_from_dict, config_to_dict
@@ -14,6 +14,8 @@ from core.project_db import ProjectDB
 from ui.tab_config import TabConfig
 from ui.tab_survey import TabSurvey
 from ui.tab_data_manager import TabDataManager
+from ui.tab_quant_config import TabQuantConfig
+from ui.tab_quant_survey import TabQuantSurvey
 
 
 class MainWindow(QMainWindow):
@@ -112,15 +114,29 @@ class MainWindow(QMainWindow):
     def new_project(self):
         if not self._close_current_if_needed():
             return
-        self.tab_config = TabConfig()
-        self.tab_config.project_created.connect(self.create_project)
+        choices = ["MCDM (DEMATEL / TOPSIS / AHP / DELPHI)", "Quantitative Survey"]
+        choice, ok = QInputDialog.getItem(self, "New Project", "Project type:", choices, 0, False)
+        if not ok:
+            self._reset_project_ui()
+            return
         self.tabs.removeTab(0)
+        if choice.startswith("Quantitative"):
+            self.tab_config = TabQuantConfig()
+            self.tab_config.project_created.connect(self.create_quant_project)
+        else:
+            self.tab_config = TabConfig()
+            self.tab_config.project_created.connect(self.create_project)
         self.tabs.insertTab(0, self.tab_config, "1. Configuration")
         self.tabs.setCurrentIndex(0)
-        self.tabs.setTabEnabled(1, False)
-        self.tabs.setTabEnabled(2, False)
-        self.tab_data.clear_project()
-        self._update_window_state()
+        self.tabs.setTabEnabled(1, False); self.tabs.setTabEnabled(2, False)
+        self.tab_data.clear_project(); self._update_window_state()
+
+    def create_quant_project(self, config_dict: dict, accounts: list, db_path: str, project_name: str):
+        try:
+            ProjectDB.create_project(db_path, project_name, "QUANTITATIVE_SURVEY", config_dict, accounts)
+            self.open_project(db_path, show_message=True)
+        except Exception as exc:
+            QMessageBox.critical(self, "Create Project Failed", f"Could not create survey project:\n\n{exc}")
 
     def open_project_dialog(self):
         # Choose the target first. Cancelling the dialog must not close the
@@ -166,20 +182,14 @@ class MainWindow(QMainWindow):
             if not meta:
                 raise ValueError("Project metadata is missing.")
 
-            config = config_from_dict(db.get_config_dict())
-            # Respondents are project data, not immutable config. Rebuild the
-            # expert list from the database so added accounts are immediately usable.
-            if config.expert_auth_mode == "Account":
-                config.experts = [
-                    Expert(
-                        name=str(r.get("full_name", "")),
-                        username=str(r.get("username", "")),
-                        password=str(r.get("password", "")),
-                        respondent_id=str(r.get("respondent_id", "")),
-                        organization=str(r.get("organization", "")),
-                    )
-                    for r in db.get_respondents()
-                ]
+            raw_config = db.get_config_dict()
+            is_quant = meta.get("project_type") == "QUANTITATIVE_SURVEY"
+            if is_quant:
+                config = raw_config
+            else:
+                config = config_from_dict(raw_config)
+                if config.expert_auth_mode == "Account":
+                    config.experts = [Expert(name=str(r.get("full_name", "")), username=str(r.get("username", "")), password=str(r.get("password", "")), respondent_id=str(r.get("respondent_id", "")), organization=str(r.get("organization", ""))) for r in db.get_respondents()]
 
             if self.project_db:
                 self.project_db.close()
@@ -187,7 +197,19 @@ class MainWindow(QMainWindow):
             self.project_path = str(Path(path).resolve())
             self.project_name = meta["project_name"]
 
-            self.tab_config.load_locked_project(config)
+            # Switch the first two tabs to the correct project engine.
+            self.tabs.removeTab(0)
+            if is_quant:
+                self.tab_config = TabQuantConfig(); self.tab_config.load_locked_project(config)
+                self.tabs.insertTab(0, self.tab_config, "1. Survey Configuration 🔒")
+                old_survey = self.tab_survey
+                self.tabs.removeTab(1)
+                self.tab_survey = TabQuantSurvey(); self.tabs.insertTab(1, self.tab_survey, "2. Survey Form")
+            else:
+                self.tab_config = TabConfig(); self.tab_config.load_locked_project(config)
+                self.tabs.insertTab(0, self.tab_config, "1. Configuration 🔒")
+                self.tabs.removeTab(1)
+                self.tab_survey = TabSurvey(); self.tabs.insertTab(1, self.tab_survey, "2. Survey Matrix")
             self.tab_survey.load_project(config, db)
             self.tab_data.load_project(db)
             self.tabs.setTabEnabled(1, True)
@@ -261,6 +283,9 @@ class MainWindow(QMainWindow):
         self.tab_config.project_created.connect(self.create_project)
         self.tabs.removeTab(0)
         self.tabs.insertTab(0, self.tab_config, "1. Configuration")
+        self.tabs.removeTab(1)
+        self.tab_survey = TabSurvey()
+        self.tabs.insertTab(1, self.tab_survey, "2. Survey Matrix")
         self._update_window_state()
         self.statusBar().showMessage("Project closed", 5000)
 
