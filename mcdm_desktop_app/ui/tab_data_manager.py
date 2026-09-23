@@ -15,7 +15,7 @@ class RespondentDialog(QDialog):
         layout = QFormLayout(self)
         self.full_name = QLineEdit(str(data.get("full_name", "")))
         self.username = QLineEdit(str(data.get("username", "")))
-        self.password = QLineEdit(str(data.get("password", "123")))
+        self.password = QLineEdit("" if data.get("respondent_id") else "123"); self.password.setEchoMode(QLineEdit.EchoMode.Password); self.password.setPlaceholderText("Leave blank to keep current password" if data.get("respondent_id") else "Password")
         self.organization = QLineEdit(str(data.get("organization", "")))
         layout.addRow("Full name", self.full_name)
         layout.addRow("Username *", self.username)
@@ -68,10 +68,10 @@ class TabDataManager(QWidget):
         lr.addWidget(self.tbl_respondents)
         root.addWidget(grp_r, 1)
 
-        grp_a = QGroupBox("Saved Responses")
+        grp_a = QGroupBox("Saved Responses / Interviews")
         la = QVBoxLayout(grp_a)
         abar = QHBoxLayout()
-        b_edit = QPushButton("Open / Edit Evaluation"); b_edit.clicked.connect(self.edit_response)
+        b_edit = QPushButton("Open / Edit Response"); b_edit.clicked.connect(self.edit_response)
         b_del = QPushButton("Delete Response"); b_del.clicked.connect(self.delete_response)
         b_ref = QPushButton("Refresh"); b_ref.clicked.connect(self.refresh)
         abar.addWidget(b_edit); abar.addWidget(b_del); abar.addWidget(b_ref); abar.addStretch(); la.addLayout(abar)
@@ -169,5 +169,5 @@ class TabDataManager(QWidget):
     def delete_response(self):
         response_id,_=self._selected_response()
         if response_id is None: return
-        if QMessageBox.question(self,"Delete Response","Delete this saved evaluation? This cannot be undone.") != QMessageBox.StandardButton.Yes: return
+        if QMessageBox.question(self,"Delete Response","Delete this saved response/interview? This cannot be undone.") != QMessageBox.StandardButton.Yes: return
         self.project_db.delete_response(response_id); self.refresh(); self.respondents_changed.emit()

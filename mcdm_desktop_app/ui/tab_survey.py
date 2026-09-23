@@ -602,6 +602,27 @@ class TabSurvey(QWidget):
         }
 
         if self.project_db:
+            # In Free mode the expert is typed directly in the UI, so there may be no
+            # respondents row yet. responses.respondent_id has a foreign key to that
+            # table; create the local respondent before saving the first response.
+            if self.config.expert_auth_mode != "Account":
+                existing = self.project_db.get_respondent(respondent_id)
+                if not existing:
+                    try:
+                        self.project_db.add_respondent(
+                            username=respondent_id,
+                            password="",
+                            full_name=exp_name,
+                            organization="",
+                            respondent_id=respondent_id,
+                        )
+                    except Exception as exc:
+                        QMessageBox.critical(
+                            self,
+                            "Save Failed",
+                            f"Could not create the free expert record before saving.\n\n{exc}",
+                        )
+                        return
             self.project_db.save_response(
                 respondent_id=respondent_id,
                 response_data={"code_matrix": code_mat, "value_matrix": val_mat},

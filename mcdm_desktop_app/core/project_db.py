@@ -1,4 +1,6 @@
 import hashlib
+import hmac
+import secrets
 import json
 import os
 import sqlite3
@@ -8,6 +10,23 @@ from typing import Any, Dict, Iterable, List, Optional
 
 
 SCHEMA_VERSION = 1
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"), salt, 200_000)
+    return "pbkdf2_sha256$200000$" + salt.hex() + "$" + digest.hex()
+
+def verify_password(password: str, stored: str) -> bool:
+    if not stored: return False
+    if not str(stored).startswith("pbkdf2_sha256$"):
+        return hmac.compare_digest(str(password), str(stored))
+    try:
+        _, rounds, salt_hex, digest_hex = str(stored).split("$", 3)
+        digest = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"), bytes.fromhex(salt_hex), int(rounds))
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except Exception:
+        return False
 
 
 def canonical_config_dict(config_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -192,6 +211,7 @@ class ProjectDB:
                 )
                 username = str(acc.get("Username") or acc.get("username") or respondent_id)
                 password = str(acc.get("Password") or acc.get("password") or "123")
+                if project_type in {"QUANTITATIVE_SURVEY", "QUALITATIVE_INTERVIEW"} and canonical_config_dict(config_dict).get("auth_mode") == "Account": password = hash_password(password)
                 full_name = str(acc.get("Full_Name") or acc.get("full_name") or "")
                 organization = str(acc.get("Organization") or acc.get("organization") or "")
                 cur.execute(
@@ -243,7 +263,7 @@ class ProjectDB:
             """INSERT INTO respondents
                (respondent_id, username, password, full_name, organization, status, created_at)
                VALUES (?, ?, ?, ?, ?, 'Pending', ?)""",
-            (respondent_id, username, str(password), str(full_name), str(organization), now),
+            (respondent_id, username, hash_password(password) if (self.get_meta() or {}).get("project_type") in {"QUANTITATIVE_SURVEY", "QUALITATIVE_INTERVIEW"} else str(password), str(full_name), str(organization), now),
         )
         self._touch()
         self.conn.commit()
@@ -251,10 +271,19 @@ class ProjectDB:
 
     def update_respondent(self, respondent_id: str, username: str, password: str, full_name: str, organization: str):
         self._require_open()
+        existing = self.conn.execute("SELECT password FROM respondents WHERE respondent_id=?", (respondent_id,)).fetchone()
+        if not existing:
+            raise ValueError("Respondent not found.")
+        stored_password = existing["password"]
+        if password:
+            if (self.get_meta() or {}).get("project_type") in {"QUANTITATIVE_SURVEY", "QUALITATIVE_INTERVIEW"}:
+                stored_password = hash_password(password)
+            else:
+                stored_password = str(password)
         cur = self.conn.execute(
             """UPDATE respondents SET username=?, password=?, full_name=?, organization=?
                WHERE respondent_id=?""",
-            (str(username).strip(), str(password), str(full_name), str(organization), respondent_id),
+            (str(username).strip(), stored_password, str(full_name), str(organization), respondent_id),
         )
         if cur.rowcount == 0:
             raise ValueError("Respondent not found.")
@@ -271,6 +300,15 @@ class ProjectDB:
         self.conn.execute("DELETE FROM respondents WHERE respondent_id=?", (respondent_id,))
         self._touch()
         self.conn.commit()
+
+    def get_respondent(self, respondent_id: str) -> Optional[Dict[str, Any]]:
+        """Return one respondent by stable respondent_id."""
+        self._require_open()
+        row = self.conn.execute(
+            "SELECT * FROM respondents WHERE respondent_id=?",
+            (str(respondent_id),),
+        ).fetchone()
+        return dict(row) if row else None
 
     def get_response(self, response_id: int) -> Optional[Dict[str, Any]]:
         self._require_open()
@@ -289,6 +327,7 @@ class ProjectDB:
             )
             username = str(acc.get("Username") or acc.get("username") or respondent_id)
             password = str(acc.get("Password") or acc.get("password") or "123")
+            if (self.get_meta() or {}).get("project_type") in {"QUANTITATIVE_SURVEY", "QUALITATIVE_INTERVIEW"}: password = hash_password(password)
             full_name = str(acc.get("Full_Name") or acc.get("full_name") or "")
             organization = str(acc.get("Organization") or acc.get("organization") or "")
             try:
@@ -307,6 +346,23 @@ class ProjectDB:
         self._touch()
         self.conn.commit()
         return added
+
+    def authenticate_respondent(self, username: str, password: str) -> Optional[Dict[str, Any]]:
+        self._require_open()
+        row = self.conn.execute("SELECT * FROM respondents WHERE username=?", (str(username).strip(),)).fetchone()
+        if not row or not verify_password(password, row["password"]): return None
+        return dict(row)
+
+    def create_anonymous_respondent(self) -> str:
+        self._require_open()
+        rid = "ANON_" + uuid.uuid4().hex
+        now = datetime.now().isoformat(timespec="seconds")
+        self.conn.execute("INSERT INTO respondents (respondent_id,username,password,full_name,organization,status,created_at) VALUES (?,?,?,?,'','Pending',?)", (rid, rid, '', 'Anonymous', now))
+        self.conn.commit(); return rid
+
+    def set_respondent_password(self, respondent_id: str, password: str):
+        self._require_open()
+        self.conn.execute("UPDATE respondents SET password=? WHERE respondent_id=?", (hash_password(password), respondent_id)); self._touch(); self.conn.commit()
 
     def save_response(
         self,

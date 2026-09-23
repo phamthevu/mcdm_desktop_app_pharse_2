@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QFileDialog,
     QMessageBox,
-    QDialog, QVBoxLayout, QTextEdit, QPushButton, QLabel, QInputDialog,
+    QDialog, QVBoxLayout, QTextEdit, QPushButton, QLabel, QInputDialog, QWidget,
 )
 
 from core.models import Expert, ProjectConfig, config_from_dict, config_to_dict
@@ -16,6 +16,9 @@ from ui.tab_survey import TabSurvey
 from ui.tab_data_manager import TabDataManager
 from ui.tab_quant_config import TabQuantConfig
 from ui.tab_quant_survey import TabQuantSurvey
+from ui.tab_welcome import TabWelcome
+from ui.tab_qual_config import TabQualConfig
+from ui.tab_qual_interview import TabQualInterview
 
 
 class MainWindow(QMainWindow):
@@ -33,22 +36,26 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        self.tab_config = TabConfig()
-        self.tab_survey = TabSurvey()
+        self.tab_config = None
+        self.tab_survey = None
         self.tab_data = TabDataManager()
-        self.tabs.addTab(self.tab_config, "1. Configuration")
-        self.tabs.addTab(self.tab_survey, "2. Survey Matrix")
-        self.tabs.addTab(self.tab_data, "3. Data Manager")
-        self.tabs.setTabEnabled(1, False)
-        self.tabs.setTabEnabled(2, False)
         self.tab_data.edit_response_requested.connect(self._edit_response_from_manager)
         self.tab_data.respondents_changed.connect(self._refresh_mutable_project_data)
-
-        self.tab_config.project_created.connect(self.create_project)
+        self._show_welcome()
 
         self._build_menu()
         self.statusBar().showMessage("Ready — create or open a project")
         self._update_window_state()
+
+    def _show_welcome(self):
+        self.tabs.clear()
+        welcome = TabWelcome()
+        welcome.new_requested.connect(self.new_project)
+        welcome.open_requested.connect(self.open_project_dialog)
+        self.tabs.addTab(welcome, "Home")
+        self.tab_config = None
+        self.tab_survey = None
+        self.statusBar().showMessage("Ready — create or open a project")
 
     # ------------------------------------------------------------------
     # Menu / project lifecycle
@@ -112,24 +119,25 @@ class MainWindow(QMainWindow):
             self.setWindowTitle("MCDM Decision Support System (Fuzzy & Z-Number)")
 
     def new_project(self):
-        if not self._close_current_if_needed():
-            return
-        choices = ["MCDM (DEMATEL / TOPSIS / AHP / DELPHI)", "Quantitative Survey"]
-        choice, ok = QInputDialog.getItem(self, "New Project", "Project type:", choices, 0, False)
-        if not ok:
-            self._reset_project_ui()
-            return
-        self.tabs.removeTab(0)
+        if not self._close_current_if_needed(): return
+        choices = ["MCDM (DEMATEL / TOPSIS / AHP / DELPHI)", "Quantitative Survey", "Qualitative In-depth Interview"]
+        choice, ok = QInputDialog.getItem(self, "New Project", "Project type:", choices, -1, False)
+        if not ok: self._show_welcome(); self._update_window_state(); return
+        self.tabs.clear()
         if choice.startswith("Quantitative"):
-            self.tab_config = TabQuantConfig()
-            self.tab_config.project_created.connect(self.create_quant_project)
+            self.tab_config = TabQuantConfig(); self.tab_config.project_created.connect(self.create_quant_project)
+            survey_title="2. Survey Form"
+        elif choice.startswith("Qualitative"):
+            self.tab_config = TabQualConfig(); self.tab_config.project_created.connect(self.create_qual_project)
+            survey_title="2. Interview Transcript"
         else:
-            self.tab_config = TabConfig()
-            self.tab_config.project_created.connect(self.create_project)
-        self.tabs.insertTab(0, self.tab_config, "1. Configuration")
-        self.tabs.setCurrentIndex(0)
-        self.tabs.setTabEnabled(1, False); self.tabs.setTabEnabled(2, False)
-        self.tab_data.clear_project(); self._update_window_state()
+            self.tab_config = TabConfig(); self.tab_config.project_created.connect(self.create_project)
+            survey_title="2. Survey Matrix"
+        self.tab_survey = QWidget()
+        self.tabs.addTab(self.tab_config, "1. Configuration")
+        self.tabs.addTab(self.tab_survey, survey_title); self.tabs.setTabEnabled(1,False)
+        self.tabs.addTab(self.tab_data, "3. Data Manager"); self.tabs.setTabEnabled(2,False)
+        self.tabs.setCurrentIndex(0); self.tab_data.clear_project(); self._update_window_state()
 
     def create_quant_project(self, config_dict: dict, accounts: list, db_path: str, project_name: str):
         try:
@@ -137,6 +145,13 @@ class MainWindow(QMainWindow):
             self.open_project(db_path, show_message=True)
         except Exception as exc:
             QMessageBox.critical(self, "Create Project Failed", f"Could not create survey project:\n\n{exc}")
+
+    def create_qual_project(self, config_dict: dict, accounts: list, db_path: str, project_name: str):
+        try:
+            ProjectDB.create_project(db_path, project_name, "QUALITATIVE_INTERVIEW", config_dict, accounts)
+            self.open_project(db_path, show_message=True)
+        except Exception as exc:
+            QMessageBox.critical(self, "Create Project Failed", f"Could not create qualitative interview project:\n\n{exc}")
 
     def open_project_dialog(self):
         # Choose the target first. Cancelling the dialog must not close the
@@ -183,8 +198,10 @@ class MainWindow(QMainWindow):
                 raise ValueError("Project metadata is missing.")
 
             raw_config = db.get_config_dict()
-            is_quant = meta.get("project_type") == "QUANTITATIVE_SURVEY"
-            if is_quant:
+            project_type = meta.get("project_type")
+            is_quant = project_type == "QUANTITATIVE_SURVEY"
+            is_qual = project_type == "QUALITATIVE_INTERVIEW"
+            if is_quant or is_qual:
                 config = raw_config
             else:
                 config = config_from_dict(raw_config)
@@ -197,19 +214,24 @@ class MainWindow(QMainWindow):
             self.project_path = str(Path(path).resolve())
             self.project_name = meta["project_name"]
 
-            # Switch the first two tabs to the correct project engine.
-            self.tabs.removeTab(0)
+            # Build project-specific workspace. The app never shows MCDM as a default home screen.
+            self.tabs.clear()
             if is_quant:
                 self.tab_config = TabQuantConfig(); self.tab_config.load_locked_project(config)
-                self.tabs.insertTab(0, self.tab_config, "1. Survey Configuration 🔒")
-                old_survey = self.tab_survey
-                self.tabs.removeTab(1)
-                self.tab_survey = TabQuantSurvey(); self.tabs.insertTab(1, self.tab_survey, "2. Survey Form")
+                self.tab_survey = TabQuantSurvey()
+                self.tabs.addTab(self.tab_config, "1. Survey Configuration 🔒")
+                self.tabs.addTab(self.tab_survey, "2. Survey Form")
+            elif is_qual:
+                self.tab_config = TabQualConfig(); self.tab_config.load_locked_project(config)
+                self.tab_survey = TabQualInterview()
+                self.tabs.addTab(self.tab_config, "1. Interview Guide 🔒")
+                self.tabs.addTab(self.tab_survey, "2. Interview Transcript")
             else:
                 self.tab_config = TabConfig(); self.tab_config.load_locked_project(config)
-                self.tabs.insertTab(0, self.tab_config, "1. Configuration 🔒")
-                self.tabs.removeTab(1)
-                self.tab_survey = TabSurvey(); self.tabs.insertTab(1, self.tab_survey, "2. Survey Matrix")
+                self.tab_survey = TabSurvey()
+                self.tabs.addTab(self.tab_config, "1. Configuration 🔒")
+                self.tabs.addTab(self.tab_survey, "2. Survey Matrix")
+            self.tabs.addTab(self.tab_data, "3. Data Manager")
             self.tab_survey.load_project(config, db)
             self.tab_data.load_project(db)
             self.tabs.setTabEnabled(1, True)
@@ -275,17 +297,8 @@ class MainWindow(QMainWindow):
         return True
 
     def _reset_project_ui(self):
-        self.tabs.setTabEnabled(1, False)
-        self.tabs.setTabEnabled(2, False)
         self.tab_data.clear_project()
-        self.tabs.setCurrentIndex(0)
-        self.tab_config = TabConfig()
-        self.tab_config.project_created.connect(self.create_project)
-        self.tabs.removeTab(0)
-        self.tabs.insertTab(0, self.tab_config, "1. Configuration")
-        self.tabs.removeTab(1)
-        self.tab_survey = TabSurvey()
-        self.tabs.insertTab(1, self.tab_survey, "2. Survey Matrix")
+        self._show_welcome()
         self._update_window_state()
         self.statusBar().showMessage("Project closed", 5000)
 
@@ -305,20 +318,26 @@ class MainWindow(QMainWindow):
     def export_results(self):
         if not self.project_db:
             return
-        self.tab_survey.on_export_all_clicked()
+        if hasattr(self.tab_survey, 'on_export_all_clicked'): self.tab_survey.on_export_all_clicked()
+        elif hasattr(self.tab_survey, 'export'): self.tab_survey.export()
 
     def merge_projects(self):
         if not self.project_db:
             return
 
-        paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Select Projects to Merge",
-            str(Path(self.project_path).parent if self.project_path else Path.home()),
-            "MCDM Project (*.mcdm)",
-        )
-        if not paths:
-            return
+        mode, ok = QInputDialog.getItem(self, "Merge Projects", "Merge source:", ["Select project files", "Select a folder (all .mcdm files)"], 0, False)
+        if not ok: return
+        base = str(Path(self.project_path).parent if self.project_path else Path.home())
+        if mode.startswith("Select a folder"):
+            folder = QFileDialog.getExistingDirectory(self, "Select Folder Containing Projects", base)
+            if not folder: return
+            paths = sorted(str(p) for p in Path(folder).rglob("*.mcdm"))
+            paths = [p for p in paths if str(Path(p).resolve()) != str(Path(self.project_path).resolve())]
+            if not paths:
+                QMessageBox.information(self, "No Projects Found", "No .mcdm project files were found in the selected folder or its subfolders."); return
+        else:
+            paths, _ = QFileDialog.getOpenFileNames(self, "Select Projects to Merge", base, "MCDM Project (*.mcdm)")
+            if not paths: return
 
         compatible = []
         incompatible = []
