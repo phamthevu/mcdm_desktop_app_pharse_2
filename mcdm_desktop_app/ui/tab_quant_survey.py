@@ -1,3 +1,4 @@
+from pathlib import Path
 import json,re
 from datetime import datetime
 from PyQt6.QtCore import QDate,QTime,QDateTime,Qt
@@ -6,19 +7,19 @@ from openpyxl import Workbook
 
 LAYOUT={"TITLE","SECTION","DESCRIPTION"}
 class TabQuantSurvey(QWidget):
-    def __init__(self): super().__init__(); self.db=None; self.config={}; self.widgets={}; self.logged_in_respondent_id=None; self.build_shell()
+    def __init__(self): super().__init__(); self.db=None; self.config={}; self.widgets={}; self.logged_in_respondent_id=None; self.editing_respondent_id=None; self.build_shell()
     def build_shell(self):
         self.root=QVBoxLayout(self); self.access_note=QLabel(); self.access_note.setWordWrap(True); self.root.addWidget(self.access_note)
-        top=QHBoxLayout(); self.respondent_label=QLabel("Respondent:"); top.addWidget(self.respondent_label); self.respondent=QComboBox(); top.addWidget(self.respondent,1); self.login_btn=QPushButton("Login..."); self.login_btn.clicked.connect(self.login); top.addWidget(self.login_btn); self.logout_btn=QPushButton("Logout"); self.logout_btn.clicked.connect(self.logout); top.addWidget(self.logout_btn); self.root.addLayout(top)
+        top=QHBoxLayout(); self.respondent_label=QLabel("Respondent:"); top.addWidget(self.respondent_label); self.free_name=QLineEdit(); self.free_name.setPlaceholderText('Participant name / response code (required)'); top.addWidget(self.free_name,1); self.respondent=QComboBox(); top.addWidget(self.respondent,1); self.login_btn=QPushButton("Login..."); self.login_btn.clicked.connect(self.login); top.addWidget(self.login_btn); self.logout_btn=QPushButton("Logout"); self.logout_btn.clicked.connect(self.logout); top.addWidget(self.logout_btn); self.root.addLayout(top)
         self.scroll=QScrollArea(); self.scroll.setWidgetResizable(True); self.formhost=QWidget(); self.form=QVBoxLayout(self.formhost); self.scroll.setWidget(self.formhost); self.root.addWidget(self.scroll,1)
-        row=QHBoxLayout(); self.save=QPushButton("SAVE RESPONSE"); self.save.clicked.connect(self.save_response); ex=QPushButton("Export Survey Data..."); ex.clicked.connect(self.export); row.addWidget(self.save); row.addWidget(ex); self.root.addLayout(row)
+        row=QHBoxLayout(); self.save=QPushButton("SAVE RESPONSE"); self.save.setProperty("success",True); self.save.clicked.connect(self.save_response); ex=QPushButton("Export Survey Data..."); ex.clicked.connect(self.export); row.addWidget(self.save); row.addWidget(ex); self.root.addLayout(row)
     def load_project(self, config, db):
-        self.config=config; self.db=db; self.logged_in_respondent_id=None; self.rebuild(); self.refresh_respondents_from_db(); self.apply_access_mode()
+        self.config=config; self.db=db; self.logged_in_respondent_id=None; self.editing_respondent_id=None; self.rebuild(); self.refresh_respondents_from_db(); self.apply_access_mode()
     def apply_access_mode(self):
-        mode=self.config.get('auth_mode','Account')
+        mode='Account' if str(self.config.get('auth_mode','Account')).strip().lower()=='account' else 'Free'
         free=mode=='Free'
-        self.respondent.setVisible(not free); self.respondent_label.setVisible(not free); self.login_btn.setVisible(not free); self.logout_btn.setVisible(not free)
-        self.access_note.setText("Access: FREE / ANONYMOUS — no login required; each Save creates a new anonymous submission." if free else "Access: ACCOUNT REQUIRED — log in with the respondent username and password before answering.")
+        self.free_name.setVisible(free); self.respondent.setVisible(not free); self.respondent_label.setVisible(True); self.respondent_label.setText('Participant:' if free else 'Respondent:'); self.login_btn.setVisible(not free); self.logout_btn.setVisible(not free)
+        self.access_note.setText("Access: FREE — enter the participant name/code for this session. After Save, the form is cleared before the next participant." if free else "Access: ACCOUNT REQUIRED — log in with the respondent username and password before answering.")
         self.save.setEnabled(free or self.logged_in_respondent_id is not None)
     def login(self):
         if not self.db:return
@@ -120,17 +121,36 @@ class TabQuantSurvey(QWidget):
         return data,errors
     def save_response(self):
         if not self.db:return
-        mode=self.config.get('auth_mode','Account')
-        if mode=='Account' and not self.logged_in_respondent_id: QMessageBox.warning(self,'Login Required','Please log in before saving a response.'); return
-        respondent_id=self.db.create_anonymous_respondent() if mode=='Free' else self.logged_in_respondent_id
+        mode='Account' if str(self.config.get('auth_mode','Account')).strip().lower()=='account' else 'Free'
+        if mode=='Account' and not (self.logged_in_respondent_id or self.editing_respondent_id): QMessageBox.warning(self,'Login Required','Please log in before saving a new response.'); return
+        free_name=self.free_name.text().strip() if mode=='Free' else ''
+        if mode=='Free' and not free_name:
+            QMessageBox.warning(self,'Participant Required','Enter the participant name or response code before saving.'); self.free_name.setFocus(); return
         data,errors=self.validate()
         if errors: QMessageBox.warning(self,'Validation Error','Please correct the highlighted fields:\n\n'+'\n'.join(errors[:10])); return
-        self.db.save_response(respondent_id,data); self.refresh_respondents_from_db(); QMessageBox.information(self,'Response Saved','Survey response saved successfully.')
+        respondent_id = self.editing_respondent_id or (self.db.create_free_respondent(free_name) if mode=='Free' else self.logged_in_respondent_id)
+        self.db.save_response(respondent_id,data); self.refresh_respondents_from_db(); QMessageBox.information(self,'Response Saved',f'Response saved successfully for {free_name or "the logged-in respondent"}.\n\nThe form will be cleared for the next participant.')
+        self._reset_for_next_response()
+    def _reset_for_next_response(self):
+        self.logged_in_respondent_id=None
+        self.editing_respondent_id=None
+        self.free_name.clear()
+        self.rebuild()
+        self.apply_access_mode()
+        self.scroll.verticalScrollBar().setValue(0)
+        if str(self.config.get('auth_mode','Account')).strip().lower()!='account': self.free_name.setFocus()
+
     def open_response_for_edit(self,respondent_id):
         i=self.respondent.findData(respondent_id)
         if i>=0:self.respondent.setCurrentIndex(i)
         row=self.db.get_response_by_respondent(respondent_id) if self.db else None
         if not row:return
+        self.editing_respondent_id=respondent_id
+        if str(self.config.get('auth_mode','Account')).strip().lower()!='account':
+            self.free_name.setText(row.get('full_name') or '')
+        else:
+            self.logged_in_respondent_id=respondent_id
+            self.login_state.setText(f"Editing existing response — {row.get('full_name') or row.get('username') or respondent_id}")
         data=json.loads(row['response_json'])
         for qid,val in data.items():
             if qid not in self.widgets:continue
@@ -159,10 +179,15 @@ class TabQuantSurvey(QWidget):
                 if var_id in nested: return nested.get(var_id)
         return None
     def export(self):
-        if not self.db:return
-        p,_=QFileDialog.getSaveFileName(self,'Export Survey Data','survey_results.xlsx','Excel (*.xlsx)')
-        if not p:return
-        if not p.lower().endswith('.xlsx'):p += '.xlsx'
+        if not self.db: return
+        default_name = f"{self.db.get_meta().get('project_name','survey_results')}.xlsx"
+        name, ok = QInputDialog.getText(self, 'Export Survey Data', 'Output file name:', text=default_name)
+        if not ok or not name.strip(): return
+        name = name.strip()
+        if not name.lower().endswith('.xlsx'): name += '.xlsx'
+        folder = QFileDialog.getExistingDirectory(self, 'Choose Export Folder')
+        if not folder: return
+        p = str(Path(folder) / name)
         wb=Workbook(); meta=wb.active; meta.title='Metadata'; m=self.db.get_meta(); [meta.append([k,v]) for k,v in m.items() if k!='config_json']
         qs=self.config.get('questions',[]); ids=[]
         for q in qs:
@@ -171,11 +196,11 @@ class TabQuantSurvey(QWidget):
             else: ids.append(q.get('question_id'))
         dataws=wb.create_sheet('Data'); dataws.append(['Answer_ID','Respondent_ID','Expert_Name','Username','Source_Project','Submitted_At']+ids)
         for r in self.db.get_all_responses():
-            d=json.loads(r['response_json']); dataws.append([f"Ans_{int(r['display_index']):02d}",r['respondent_id'],r.get('full_name'),r.get('username'),r.get('source_project_name'),r.get('submitted_at')]+[json.dumps(d.get(i),ensure_ascii=False) if isinstance(d.get(i),list) else d.get(i) for i in ids])
-        cw=wb.create_sheet('Codebook'); cw.append(['Variable_ID','Parent_ID','Question_Text','Question_Type','Required','Options','Min','Max','Description'])
+            d=json.loads(r['response_json']); dataws.append([f"Ans_{int(r['display_index']):02d}",r['respondent_id'],r.get('full_name'),r.get('username'),r.get('source_project_name'),r.get('submitted_at')]+[self._export_value(d,i,qs) for i in ids])
+        resp=wb.create_sheet('Respondent'); resp.append(['Respondent_ID','Full_Name','Username','Organization','Status'])
+        for r in self.db.get_respondents(): resp.append([r.get('respondent_id'),r.get('full_name'),r.get('username'),r.get('organization'),r.get('status')])
+        code=wb.create_sheet('Codebook'); code.append(['Question_ID','Question_Text','Question_Type','Required','Options','Parent_ID'])
         for q in qs:
-            if str(q.get('question_type','')).startswith('MATRIX_'):
-                for item in q.get('matrix_items',[]): cw.append([item.get('item_id'),q.get('question_id'),item.get('item_text'),q.get('question_type'),q.get('required'),q.get('options'),q.get('min_value'),q.get('max_value'),q.get('description')])
-            else: cw.append([q.get('question_id'),' ',q.get('question_text'),q.get('question_type'),q.get('required'),q.get('options'),q.get('min_value'),q.get('max_value'),q.get('description')])
-        rw=wb.create_sheet('Respondent'); rw.append(['Respondent_ID','Username','Full_Name','Organization','Status']); [rw.append([r.get('respondent_id'),r.get('username'),r.get('full_name'),r.get('organization'),r.get('status')]) for r in self.db.get_respondents()]
-        wb.save(p); QMessageBox.information(self,'Export Complete',f'Survey data exported successfully.\n\n{p}')
+            code.append([q.get('question_id'),q.get('question_text'),q.get('question_type'),q.get('required'),' | '.join(map(str,q.get('options',[]) or [])),''])
+            for mi in q.get('matrix_items',[]) or []: code.append([mi.get('item_id'),mi.get('item_text'),'MATRIX_ITEM',q.get('required'),' | '.join(map(str,q.get('options',[]) or [])),q.get('question_id')])
+        wb.save(p); QMessageBox.information(self,'Export Successful',f'Exported successfully to:\n{p}')

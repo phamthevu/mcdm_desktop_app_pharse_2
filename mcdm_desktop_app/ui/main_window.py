@@ -26,8 +26,33 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MCDM Decision Support System (Fuzzy & Z-Number)")
+        self.setWindowTitle("Research Studio")
         self.resize(1200, 800)
+        self.setStyleSheet("""
+            QMainWindow, QWidget { font-family: 'Segoe UI'; font-size: 10pt; }
+            QMainWindow { background:#f5f7fb; }
+            QGroupBox { background:white; border:1px solid #dfe3ea; border-radius:8px; margin-top:12px; padding-top:10px; font-weight:600; }
+            QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 5px; }
+            QPushButton { min-height:30px; padding:3px 12px; border-radius:6px; border:1px solid #cbd2dc; background:#ffffff; }
+            QPushButton:hover { background:#f0f4fa; border-color:#9eabc0; }
+            QPushButton[secondary="true"] { background:#f7f8fa; }
+            QPushButton[primary="true"] { background:#0d6efd; color:white; border:1px solid #0d6efd; font-weight:700; }
+            QPushButton[primary="true"]:hover { background:#0b5ed7; }
+            QPushButton[accent="true"] { background:#6f42c1; color:white; border:1px solid #6f42c1; font-weight:650; }
+            QPushButton[accent="true"]:hover { background:#59359c; }
+            QPushButton[success="true"] { background:#198754; color:white; border:1px solid #198754; font-weight:700; }
+            QPushButton[success="true"]:hover { background:#157347; }
+            QPushButton[danger="true"] { background:#dc3545; color:white; border:1px solid #dc3545; font-weight:650; }
+            QPushButton[danger="true"]:hover { background:#bb2d3b; }
+            QPushButton:disabled { background:#e5e7eb; color:#98a2b3; border-color:#d0d5dd; }
+            QLineEdit, QComboBox, QPlainTextEdit, QTableWidget { background:white; border:1px solid #cfd6e0; border-radius:5px; padding:5px; }
+            QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus { border:1px solid #4c78dd; }
+            QTabWidget::pane { border:1px solid #dfe3ea; background:#f8fafc; }
+            QTabBar::tab { padding:9px 16px; margin-right:2px; }
+            QTabBar::tab:selected { background:white; font-weight:600; }
+            QLabel#pageTitle { font-size:18pt; font-weight:700; color:#1f2937; }
+            QLabel#muted { color:#667085; }
+        """)
 
         self.project_db = None
         self.project_path = None
@@ -113,10 +138,10 @@ class MainWindow(QMainWindow):
             meta = self.project_db.get_meta()
             self.project_name = meta["project_name"] if meta else self.project_name
             self.setWindowTitle(
-                f"MCDM Decision Support System — {self.project_name}"
+                f"Research Studio — {self.project_name}"
             )
         else:
-            self.setWindowTitle("MCDM Decision Support System (Fuzzy & Z-Number)")
+            self.setWindowTitle("Research Studio")
 
     def new_project(self):
         if not self._close_current_if_needed(): return
@@ -205,8 +230,10 @@ class MainWindow(QMainWindow):
                 config = raw_config
             else:
                 config = config_from_dict(raw_config)
-                if config.expert_auth_mode == "Account":
-                    config.experts = [Expert(name=str(r.get("full_name", "")), username=str(r.get("username", "")), password=str(r.get("password", "")), respondent_id=str(r.get("respondent_id", "")), organization=str(r.get("organization", ""))) for r in db.get_respondents()]
+                # V4.7: MCDM is always an identified-expert workflow. Existing
+                # respondents remain readable; new projects cannot be Free Entry.
+                config.expert_auth_mode = "Account"
+                config.experts = [Expert(name=str(r.get("full_name", "")), username=str(r.get("username", "")), password=str(r.get("password", "")), respondent_id=str(r.get("respondent_id", "")), organization=str(r.get("organization", ""))) for r in db.get_respondents()]
 
             if self.project_db:
                 self.project_db.close()
@@ -309,6 +336,9 @@ class MainWindow(QMainWindow):
         self.tab_data.refresh()
 
     def _edit_response_from_manager(self, respondent_id: str):
+        """Open an existing response in edit mode without re-authenticating the respondent."""
+        if not self.tab_survey:
+            return
         self.tab_survey.open_response_for_edit(respondent_id)
         self.tabs.setCurrentWidget(self.tab_survey)
 
@@ -376,8 +406,9 @@ class MainWindow(QMainWindow):
 
         try:
             logs = self.project_db.merge_other_projects(compatible)
-            self.tab_survey.reload_from_project_db()
-            self.tab_data.refresh()
+            # V4.7.2: refresh project-type views through capabilities rather than
+            # assuming every survey/interview widget implements the MCDM method.
+            self._refresh_after_merge()
             summary = "\n".join(
                 f"{item['project_name']}: {item['count']} response(s)"
                 for item in logs
@@ -388,6 +419,23 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Merge completed successfully", 8000)
         except Exception as exc:
             QMessageBox.critical(self, "Merge Failed", str(exc))
+
+    def _refresh_after_merge(self):
+        """Refresh visible data after a successful merge for every project type.
+
+        MCDM and Quantitative expose reload_from_project_db(); Qualitative has no
+        respondent roster to reload, so its transcript is reset to a clean session.
+        Data Manager is always refreshed.
+        """
+        survey = self.tab_survey
+        reload_fn = getattr(survey, "reload_from_project_db", None)
+        if callable(reload_fn):
+            reload_fn()
+        elif isinstance(survey, TabQualInterview):
+            # Merge only adds completed interviews. Do not keep stale identity or
+            # transcript state on screen after the underlying DB changed.
+            survey.load_project(survey.config, self.project_db)
+        self.tab_data.refresh()
 
     def show_project_information(self):
         if not self.project_db:

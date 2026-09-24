@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QPushButton,
-    QComboBox, QLineEdit, QMessageBox, QFileDialog, QFrame,
+    QComboBox, QLineEdit, QMessageBox, QFileDialog, QInputDialog, QFrame,
     QSplitter
 )
 from PyQt6.QtCore import Qt
@@ -25,6 +25,7 @@ class TabSurvey(QWidget):
         self.project_db: ProjectDB = None
         self.current_expert: Expert = None
         self.is_authenticated = False
+        self.editing_respondent_id = None
 
         self.init_ui()
 
@@ -209,6 +210,9 @@ class TabSurvey(QWidget):
         self.project_db = project_db
         self.saved_experts_data.clear()
         self.cell_widgets.clear()
+        # Transient UI/session identity must never leak from a previously opened
+        # project. Quantitative/Qualitative already reset this state between forms.
+        self.editing_respondent_id = None
         self.is_authenticated = False
 
         # Restore already persisted responses. The database identity is based on
@@ -235,6 +239,24 @@ class TabSurvey(QWidget):
         self.lbl_model_badge.setText(config.model_type)
         self.lbl_z_badge.setText(f"Z-Number: {'ON' if config.use_z_number else 'OFF'}")
 
+        # Account identity must come from the project database, not from the
+        # original Excel/config snapshot.  The DB respondent_id is the parent key
+        # referenced by responses.respondent_id.  This also repairs older projects
+        # whose config-side Expert objects do not carry the persisted UUID.
+        if self.project_db and config.expert_auth_mode == "Account":
+            db_respondents = self.project_db.get_respondents()
+            if db_respondents:
+                config.experts = [
+                    Expert(
+                        name=str(r.get("full_name", "")),
+                        username=str(r.get("username", "")),
+                        password=str(r.get("password", "")),
+                        respondent_id=str(r.get("respondent_id", "")),
+                        organization=str(r.get("organization", "")),
+                    )
+                    for r in db_respondents
+                ]
+
         # Nạp Chuyên gia vào Dropdown
         self.cb_experts.blockSignals(True)
         self.cb_experts.clear()
@@ -250,7 +272,8 @@ class TabSurvey(QWidget):
         else:
             self.cb_experts.setVisible(False)
             self.txt_expert_free.setVisible(True)
-            self.txt_expert_free.setText("Expert_01")
+            self.txt_expert_free.clear()
+            self.txt_expert_free.setPlaceholderText("Enter expert / participant name for this response...")
             self.lbl_pwd.setVisible(False)
             self.txt_password.setVisible(False)
             self.btn_login.setVisible(False)
@@ -303,6 +326,9 @@ class TabSurvey(QWidget):
         row = self.project_db.get_response_by_respondent(respondent_id) if self.project_db else None
         if not row:
             return
+        if self.config.expert_auth_mode != "Account":
+            self.editing_respondent_id = respondent_id
+            self.txt_expert_free.setText(row.get("full_name") or "")
         try:
             payload = __import__("json").loads(row["response_json"])
             saved = payload.get("code_matrix", [])
@@ -478,8 +504,10 @@ class TabSurvey(QWidget):
             return
 
         input_pwd = self.txt_password.text().strip()
-        if str(exp.password).strip() == input_pwd:
+        auth_row = self.project_db.authenticate_respondent(str(exp.username or "").strip(), input_pwd) if self.project_db else None
+        if auth_row:
             self.is_authenticated = True
+            exp.respondent_id = str(auth_row.get("respondent_id", exp.respondent_id))
             self.lock_matrix(False)
             self.txt_password.clear()
             
@@ -494,7 +522,7 @@ class TabSurvey(QWidget):
             else:
                 QMessageBox.information(self, "Success", f"Authenticated successfully for {exp.name}. Matrix is unlocked.")
         else:
-            QMessageBox.critical(self, "Access Denied", "Incorrect password! Please check the password defined in the Excel template.")
+            QMessageBox.critical(self, "Access Denied", "Incorrect password for the selected expert account.")
 
     def on_expert_selected_change(self):
         """Khi chọn chuyên gia khác: Tự động khóa lại & REFRESH trắng ma trận."""
@@ -558,28 +586,34 @@ class TabSurvey(QWidget):
     # LƯU VÀ XUẤT KẾT QUẢ
     # =========================================================================
     def save_current_expert(self):
-        """Lưu bài đánh giá của chuyên gia hiện tại."""
-        exp_name = ""
-        respondent_id = ""
-        if self.config.expert_auth_mode == "Account":
-            exp: Expert = self.cb_experts.currentData()
-            if not exp:
-                return
-            exp_name = exp.name
-            respondent_id = exp.respondent_id or exp.username
-        else:
-            exp_name = self.txt_expert_free.text().strip()
-            respondent_id = f"FREE_{exp_name}" if exp_name else ""
+        """Save/update an MCDM evaluation for an existing expert account.
 
-        if not exp_name:
-            QMessageBox.warning(self, "Warning", "Please provide a valid expert name.")
+        V4.7 removes MCDM Free Entry. The respondent_id must always reference
+        a persisted roster row, preventing orphan responses and FK failures.
+        """
+        if not self.project_db:
+            QMessageBox.warning(self, "Project Required", "Open or create a project before saving.")
+            return
+        exp: Expert = self.cb_experts.currentData()
+        if not exp:
+            QMessageBox.warning(self, "Expert Required", "Select an expert before saving.")
+            return
+        if not self.is_authenticated:
+            QMessageBox.warning(self, "Login Required", "Login as the selected expert before saving.")
             return
 
-        r_len = len(self.row_labels)
-        c_len = len(self.col_labels)
+        respondent_id = str(exp.respondent_id or "").strip()
+        row = self.project_db.get_respondent(respondent_id) if respondent_id else None
+        if not row:
+            row = self.project_db.get_respondent_by_username(str(exp.username or "").strip())
+            respondent_id = str(row.get("respondent_id", "")) if row else ""
+        if not respondent_id or not row:
+            QMessageBox.critical(self, "Save Failed", "The selected expert account no longer exists in this project. Refresh the project and try again.")
+            return
+
+        r_len, c_len = len(self.row_labels), len(self.col_labels)
         code_mat = [["" for _ in range(c_len)] for _ in range(r_len)]
         val_mat = [["" for _ in range(c_len)] for _ in range(r_len)]
-
         for r in range(r_len):
             for c in range(c_len):
                 if (r, c) in self.cell_widgets:
@@ -592,46 +626,11 @@ class TabSurvey(QWidget):
                     code_mat[r][c] = txt
                     val_mat[r][c] = txt
 
-        answer_key = respondent_id or exp_name
-        self.saved_experts_data[answer_key] = {
-            "code_matrix": code_mat,
-            "value_matrix": val_mat,
-            "expert_name": exp_name,
-            "respondent_id": respondent_id,
-            "answer_id": self._answer_id_for_key(answer_key),
-        }
-
-        if self.project_db:
-            # In Free mode the expert is typed directly in the UI, so there may be no
-            # respondents row yet. responses.respondent_id has a foreign key to that
-            # table; create the local respondent before saving the first response.
-            if self.config.expert_auth_mode != "Account":
-                existing = self.project_db.get_respondent(respondent_id)
-                if not existing:
-                    try:
-                        self.project_db.add_respondent(
-                            username=respondent_id,
-                            password="",
-                            full_name=exp_name,
-                            organization="",
-                            respondent_id=respondent_id,
-                        )
-                    except Exception as exc:
-                        QMessageBox.critical(
-                            self,
-                            "Save Failed",
-                            f"Could not create the free expert record before saving.\n\n{exc}",
-                        )
-                        return
-            self.project_db.save_response(
-                respondent_id=respondent_id,
-                response_data={"code_matrix": code_mat, "value_matrix": val_mat},
-            )
-            # Reload Answer numbering from the persisted database after every save.
-            self.reload_from_project_db()
-
+        existed = self.project_db.get_response_by_respondent(respondent_id) is not None
+        self.project_db.save_response(respondent_id=respondent_id, response_data={"code_matrix": code_mat, "value_matrix": val_mat})
+        self.reload_from_project_db()
         self.update_progress_counter()
-        QMessageBox.information(self, "Saved", f"Data for expert '{exp_name}' has been successfully saved!")
+        QMessageBox.information(self, "Saved", f"Evaluation for '{exp.name}' has been {'updated' if existed else 'saved'} successfully.")
 
     def _answer_id_for_key(self, respondent_id: str) -> str:
         if self.project_db:
@@ -677,12 +676,18 @@ class TabSurvey(QWidget):
             QMessageBox.warning(self, "No Data", "No expert data has been saved yet to export.")
             return
 
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder to Save 2 Result Files")
+        suggested = f"ALL_EXPERTS_{self.config.model_type}"
+        stem, ok = QInputDialog.getText(self, "Export Results", "Output base file name:", text=suggested)
+        if not ok or not stem.strip():
+            return
+        stem = stem.strip()
+        if stem.lower().endswith('.xlsx'): stem = stem[:-5]
+        folder = QFileDialog.getExistingDirectory(self, "Choose Export Folder")
         if not folder:
             return
-
-        file_code = f"{folder}/ALL_EXPERTS_{self.config.model_type}_RAW_CODES.xlsx"
-        file_val = f"{folder}/ALL_EXPERTS_{self.config.model_type}_NUMERICAL_VALUES.xlsx"
+        from pathlib import Path
+        file_code = str(Path(folder) / f"{stem}_RAW_CODES.xlsx")
+        file_val = str(Path(folder) / f"{stem}_NUMERICAL_VALUES.xlsx")
 
         try:
             export_all_experts_results(

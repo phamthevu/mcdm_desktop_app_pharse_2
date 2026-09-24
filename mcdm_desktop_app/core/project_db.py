@@ -30,28 +30,32 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 def canonical_config_dict(config_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the part of a project that defines its immutable configuration.
+    """Immutable project config persisted in config_json.
 
-    Project identity fields such as project_id/project_name/path/timestamps are
-    intentionally excluded. Two independently named projects with the same
-    configuration therefore produce the same config hash and can be merged.
+    Access/auth mode remains here because the UI needs it when reopening a project.
+    Project identity and mutable respondent roster are excluded.
     """
     excluded = {
-        "project_id",
-        "project_name",
-        "project_path",
-        "created_at",
-        "modified_at",
-        "application_version",
-        "config_hash",
-        # Respondent roster is mutable project data; it is not immutable config.
-        "experts",
+        "project_id", "project_name", "project_path", "created_at", "modified_at",
+        "application_version", "config_hash", "experts",
     }
     return {k: v for k, v in config_dict.items() if k not in excluded}
 
 
-def calculate_config_hash(config_dict: Dict[str, Any]) -> str:
+def merge_canonical_config_dict(config_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Research structure used only for merge compatibility.
+
+    Free vs Account changes collection/authentication workflow, not the research
+    instrument, so all access-mode keys are intentionally ignored.
+    """
     canonical = canonical_config_dict(config_dict)
+    for key in ("auth_mode", "expert_auth_mode", "respondent_mode", "access_mode"):
+        canonical.pop(key, None)
+    return canonical
+
+
+def calculate_config_hash(config_dict: Dict[str, Any]) -> str:
+    canonical = merge_canonical_config_dict(config_dict)
     payload = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -310,6 +314,15 @@ class ProjectDB:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_respondent_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        """Resolve an account username to its stable persisted respondent row."""
+        self._require_open()
+        row = self.conn.execute(
+            "SELECT * FROM respondents WHERE username=?",
+            (str(username or "").strip(),),
+        ).fetchone()
+        return dict(row) if row else None
+
     def get_response(self, response_id: int) -> Optional[Dict[str, Any]]:
         self._require_open()
         row = self.conn.execute("SELECT * FROM responses WHERE id=?", (response_id,)).fetchone()
@@ -353,6 +366,23 @@ class ProjectDB:
         if not row or not verify_password(password, row["password"]): return None
         return dict(row)
 
+    def create_free_respondent(self, full_name: str = "") -> str:
+        """Create a unique respondent for one Free-mode submission.
+
+        A new UUID is used for every submission so repeated display names never
+        overwrite another participant's response.
+        """
+        self._require_open()
+        rid = "FREE_" + uuid.uuid4().hex
+        now = datetime.now().isoformat(timespec="seconds")
+        name = str(full_name or "").strip() or "Anonymous"
+        self.conn.execute(
+            "INSERT INTO respondents (respondent_id,username,password,full_name,organization,status,created_at) VALUES (?,?,?,?,'','Pending',?)",
+            (rid, rid, '', name, now),
+        )
+        self.conn.commit()
+        return rid
+
     def create_anonymous_respondent(self) -> str:
         self._require_open()
         rid = "ANON_" + uuid.uuid4().hex
@@ -377,6 +407,27 @@ class ProjectDB:
         cur = self.conn.cursor()
         now = datetime.now().isoformat(timespec="seconds")
         data_str = json.dumps(response_data, ensure_ascii=False, separators=(",", ":"))
+
+        # Never attempt a child INSERT with a non-existent respondent FK.
+        # Older V4 project/config snapshots could hold username in place of the
+        # persisted respondent UUID. Resolve that legacy identity through the DB.
+        respondent_id = str(respondent_id or "").strip()
+        parent = cur.execute(
+            "SELECT respondent_id FROM respondents WHERE respondent_id = ?",
+            (respondent_id,),
+        ).fetchone()
+        if not parent and respondent_id:
+            parent = cur.execute(
+                "SELECT respondent_id FROM respondents WHERE username = ?",
+                (respondent_id,),
+            ).fetchone()
+            if parent:
+                respondent_id = str(parent["respondent_id"])
+        if not parent:
+            raise ValueError(
+                "Cannot save response: respondent does not exist in this project. "
+                "Refresh/re-open the project or add the respondent first."
+            )
         project_meta = self.get_meta() or {}
         source_project_id = source_project_id or project_meta.get("project_id")
         source_project_name = source_project_name or project_meta.get("project_name")
@@ -499,8 +550,16 @@ class ProjectDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def _merge_signature_from_json(self, config_json: str) -> str:
+        config = json.loads(config_json or "{}")
+        return calculate_config_hash(config)
+
     def compare_merge_config(self, other_path: str) -> Dict[str, Any]:
-        """Return merge compatibility plus human-readable configuration differences."""
+        """Compare research structure, deliberately ignoring Account/Free access mode.
+
+        The signature is recalculated from config_json so legacy projects whose stored
+        config_hash included auth_mode remain merge-compatible in V4.6.
+        """
         self._require_open()
         other = sqlite3.connect(other_path)
         other.row_factory = sqlite3.Row
@@ -511,50 +570,33 @@ class ProjectDB:
                 return {"compatible": False, "differences": ["Project metadata is missing."]}
             differences = []
             if src["project_type"] != target["project_type"]:
-                differences.append(
-                    f"project_type: current={target['project_type']!r}, source={src['project_type']!r}"
-                )
+                differences.append(f"project_type: current={target['project_type']!r}, source={src['project_type']!r}")
             try:
-                left = canonical_config_dict(json.loads(target["config_json"]))
-                right = canonical_config_dict(json.loads(src["config_json"]))
-                keys = sorted(set(left) | set(right))
-                for key in keys:
+                left = merge_canonical_config_dict(json.loads(target["config_json"]))
+                right = merge_canonical_config_dict(json.loads(src["config_json"]))
+                for key in sorted(set(left) | set(right)):
                     if left.get(key) != right.get(key):
                         lv = json.dumps(left.get(key), ensure_ascii=False)
                         rv = json.dumps(right.get(key), ensure_ascii=False)
                         if len(lv) > 220: lv = lv[:217] + "..."
                         if len(rv) > 220: rv = rv[:217] + "..."
                         differences.append(f"{key}: current={lv}; source={rv}")
+                source_sig = calculate_config_hash(json.loads(src["config_json"]))
+                target_sig = calculate_config_hash(json.loads(target["config_json"]))
             except Exception as exc:
                 differences.append(f"Could not compare config JSON: {exc}")
-            compatible = (src["project_type"] == target["project_type"] and
-                          src["config_hash"] == target["config_hash"] and not differences)
+                source_sig = target_sig = ""
+            compatible = bool(src["project_type"] == target["project_type"] and source_sig == target_sig and not differences)
             return {
-                "compatible": compatible,
-                "differences": differences,
-                "source_project_id": src["project_id"],
-                "source_project_name": src["project_name"],
-                "source_config_hash": src["config_hash"],
-                "target_config_hash": target["config_hash"],
+                "compatible": compatible, "differences": differences,
+                "source_project_id": src["project_id"], "source_project_name": src["project_name"],
+                "source_config_hash": source_sig, "target_config_hash": target_sig,
             }
         finally:
             other.close()
 
     def is_merge_compatible(self, other_path: str) -> bool:
-        self._require_open()
-        other = sqlite3.connect(other_path)
-        other.row_factory = sqlite3.Row
-        try:
-            src = other.execute("SELECT * FROM project_meta LIMIT 1").fetchone()
-            target = self.get_meta()
-            return bool(
-                src
-                and target
-                and src["project_type"] == target["project_type"]
-                and src["config_hash"] == target["config_hash"]
-            )
-        finally:
-            other.close()
+        return bool(self.compare_merge_config(other_path).get("compatible"))
 
     def merge_other_projects(self, list_of_paths: Iterable[str]):
         """Merge response data from projects with identical immutable config.
@@ -583,23 +625,41 @@ class ProjectDB:
                 if not src_meta:
                     raise ValueError(f"'{os.path.basename(path)}' is not a valid project.")
 
-                if (
-                    src_meta["project_type"] != target_meta["project_type"]
-                    or src_meta["config_hash"] != target_meta["config_hash"]
-                ):
+                compatibility = self.compare_merge_config(path)
+                if not compatibility.get("compatible"):
+                    details = "; ".join(compatibility.get("differences", []))
                     raise ValueError(
-                        f"Cannot merge '{os.path.basename(path)}': configuration is different."
+                        f"Cannot merge '{os.path.basename(path)}': research configuration is different."
+                        + (f"\n{details}" if details else "")
                     )
 
                 imported = 0
                 now = datetime.now().isoformat(timespec="seconds")
                 source_file = os.path.basename(path)
 
+                # Determine which source responses are genuinely new before copying
+                # respondents. This makes repeated merge of the same source idempotent
+                # and avoids orphan/duplicate respondent rows.
+                src_responses = src.execute(
+                    "SELECT * FROM responses ORDER BY id"
+                ).fetchall()
+                pending_responses = []
+                for response in src_responses:
+                    source_response_id = str(response["id"])
+                    exists = cur.execute(
+                        "SELECT 1 FROM responses WHERE source_project_id=? AND source_response_id=? LIMIT 1",
+                        (src_meta["project_id"], source_response_id),
+                    ).fetchone()
+                    if not exists:
+                        pending_responses.append(response)
+                pending_respondent_ids = {r["respondent_id"] for r in pending_responses}
+
                 # Respondents are copied with new IDs when an ID collision exists.
                 # This allows two independently created projects to contain the same
                 # human name/username without breaking the target project.
                 respondent_map: Dict[str, str] = {}
-                src_respondents = src.execute("SELECT * FROM respondents").fetchall()
+                src_respondents = [r for r in src.execute("SELECT * FROM respondents").fetchall()
+                                   if r["respondent_id"] in pending_respondent_ids]
                 for acc in src_respondents:
                     old_id = acc["respondent_id"]
                     existing = cur.execute(
@@ -638,10 +698,8 @@ class ProjectDB:
                     )
                     respondent_map[old_id] = new_id
 
-                src_responses = src.execute(
-                    "SELECT * FROM responses ORDER BY id"
-                ).fetchall()
-                for response in src_responses:
+                for response in pending_responses:
+                    source_response_id = str(response["id"])
                     new_respondent_id = respondent_map.get(response["respondent_id"])
                     if not new_respondent_id:
                         # Defensive path for old/incomplete projects.
@@ -676,7 +734,7 @@ class ProjectDB:
                             new_respondent_id,
                             src_meta["project_id"],
                             src_meta["project_name"],
-                            str(response["id"]),
+                            source_response_id,
                             source_file,
                             response["submitted_at"],
                             now,

@@ -15,7 +15,7 @@ class TabQuantConfig(QWidget):
         self.auth_mode=QComboBox(); self.auth_mode.addItem("Free / Anonymous", "Free"); self.auth_mode.addItem("Account Required", "Account"); af.addRow("Access mode", self.auth_mode); lay.addWidget(access_box)
         self.info=QLabel("Questions define the immutable survey schema. In Account mode, each respondent uses a username/password. In Free mode, submissions are anonymous."); self.info.setWordWrap(True); lay.addWidget(self.info)
         self.table=QTableWidget(); self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); lay.addWidget(self.table)
-        self.create=QPushButton("CREATE QUANTITATIVE SURVEY PROJECT"); self.create.setMinimumHeight(44); self.create.clicked.connect(self.create_project); lay.addWidget(self.create)
+        self.create=QPushButton("CREATE QUANTITATIVE SURVEY PROJECT"); self.create.setProperty("primary",True); self.create.setMinimumHeight(44); self.create.clicked.connect(self.create_project); lay.addWidget(self.create)
     def browse(self):
         p,_=QFileDialog.getOpenFileName(self,"Survey Config","","Excel (*.xlsx *.xls)")
         if p: self.path.setText(p); self.load_preview()

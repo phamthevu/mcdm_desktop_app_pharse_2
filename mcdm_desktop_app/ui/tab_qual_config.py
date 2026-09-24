@@ -10,7 +10,7 @@ class TabQualConfig(QWidget):
         row=QHBoxLayout(); self.path=QLineEdit(); self.path.setPlaceholderText("Interview guide .xlsx"); row.addWidget(self.path); b=QPushButton("Browse..."); b.clicked.connect(self.browse); row.addWidget(b); g=QPushButton("Generate Template..."); g.clicked.connect(self.gen); row.addWidget(g); lay.addLayout(row)
         box=QGroupBox("Participant Access (locked after project creation)"); f=QFormLayout(box); self.auth_mode=QComboBox(); self.auth_mode.addItem("Free / Anonymous","Free"); self.auth_mode.addItem("Account Required","Account"); f.addRow("Access mode",self.auth_mode); lay.addWidget(box)
         self.status=QLabel("Load an interview guide to validate it."); self.status.setWordWrap(True); lay.addWidget(self.status); self.table=QTableWidget(); self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); lay.addWidget(self.table)
-        self.create=QPushButton("CREATE QUALITATIVE INTERVIEW PROJECT"); self.create.setMinimumHeight(44); self.create.clicked.connect(self.create_project); lay.addWidget(self.create)
+        self.create=QPushButton("CREATE QUALITATIVE INTERVIEW PROJECT"); self.create.setProperty("primary",True); self.create.setMinimumHeight(44); self.create.clicked.connect(self.create_project); lay.addWidget(self.create)
     def browse(self):
         p,_=QFileDialog.getOpenFileName(self,"Interview Guide","","Excel (*.xlsx *.xls)")
         if p:self.path.setText(p); self.load_preview()

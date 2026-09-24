@@ -87,21 +87,27 @@ class TabConfig(QWidget):
         self.rb_category.toggled.connect(self.on_scale_type_toggled)
         left_layout.addWidget(grp_scale)
 
-        # 3. Respondent Mode
-        grp_expert = QGroupBox("3. Respondent Mode (Experts)")
+        # 3. Expert Access — V4.7: MCDM always uses a predefined expert roster.
+        # MCDM is an expert-evaluation workflow, so anonymous/free entry is not
+        # offered. Quantitative and Qualitative projects still support Free/Account.
+        grp_expert = QGroupBox("3. Expert Access")
         lay_expert = QVBoxLayout(grp_expert)
-
         self.rb_expert_account = QRadioButton("Excel Roster (Predefined Username / Password)")
-        self.rb_expert_free = QRadioButton("Free Entry (Open survey, expert provides name)")
         self.rb_expert_account.setChecked(True)
-
+        self.rb_expert_account.setEnabled(False)
+        # Compatibility attribute for older code paths; never shown/selected.
+        self.rb_expert_free = QRadioButton("Free Entry")
+        self.rb_expert_free.setChecked(False)
+        self.rb_expert_free.setVisible(False)
+        self._selected_expert_auth_mode = "Account"
         self.btn_group_expert = QButtonGroup(self)
         self.btn_group_expert.addButton(self.rb_expert_account)
         self.btn_group_expert.addButton(self.rb_expert_free)
-
         lay_expert.addWidget(self.rb_expert_account)
-        lay_expert.addWidget(self.rb_expert_free)
-        self.rb_expert_account.toggled.connect(self.on_config_changed)
+        note = QLabel("MCDM requires identified experts from the Excel roster. Free Entry is available only for Quantitative and Qualitative projects.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#64748b; font-size:11px;")
+        lay_expert.addWidget(note)
         left_layout.addWidget(grp_expert)
 
         # 4. Template File
@@ -118,6 +124,7 @@ class TabConfig(QWidget):
         self.btn_browse.clicked.connect(self.browse_excel_file)
 
         self.btn_gen_template = QPushButton("Generate Default Template")
+        self.btn_gen_template.setProperty("accent", True)
         self.btn_gen_template.clicked.connect(self.generate_template_click)
 
         h_btn_file.addWidget(self.btn_browse)
@@ -128,6 +135,7 @@ class TabConfig(QWidget):
         # 5. START Button
         left_layout.addStretch()
         self.btn_start = QPushButton("START SURVEY")
+        self.btn_start.setProperty("primary", True)
         self.btn_start.setFixedHeight(45)
         self.btn_start.setStyleSheet("""
             QPushButton {
@@ -214,6 +222,12 @@ class TabConfig(QWidget):
     def on_config_changed(self):
         self.reload_excel_data()
 
+    def _on_expert_mode_changed(self, _checked=False):
+        """MCDM V4.7 always uses identified expert accounts."""
+        self._selected_expert_auth_mode = "Account"
+        self.rb_expert_account.setChecked(True)
+        self.reload_excel_data()
+
     def browse_excel_file(self):
         file_name, _ = QFileDialog.getOpenFileName(
             self, "Select Excel Configuration Template", "", "Excel Files (*.xlsx *.xls)"
@@ -227,12 +241,20 @@ class TabConfig(QWidget):
             self.txt_file_path.setText(str(default_tpl.resolve()))
 
     def generate_template_click(self):
+        output_path, _ = QFileDialog.getSaveFileName(
+            self, "Save MCDM Configuration Template",
+            "MCDM_Config_Template.xlsx", "Excel Files (*.xlsx)"
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".xlsx"):
+            output_path += ".xlsx"
         try:
-            generate_default_template()
-            default_tpl = Path("templates/Config_Template.xlsx").resolve()
-            self.txt_file_path.setText(str(default_tpl))
+            generate_default_template(output_path)
+            self.txt_file_path.setText(str(Path(output_path).resolve()))
             QMessageBox.information(
-                self, "Success", f"Default template generated successfully at:\n{default_tpl}"
+                self, "Template Created",
+                f"MCDM template created successfully.\n\n{Path(output_path).resolve()}"
             )
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to generate template: {e}")
@@ -247,10 +269,16 @@ class TabConfig(QWidget):
         self.config.scale_type = "Continuous" if self.rb_continuous.isChecked() else "Category"
         self.config.continuous_min = float(self.spin_min.text() or 0)
         self.config.continuous_max = float(self.spin_max.text() or 10)
-        self.config.expert_auth_mode = "Account" if self.rb_expert_account.isChecked() else "Free"
+        # UI selection is authoritative. Excel supplies factors/scales/roster,
+        # never the respondent access mode.
+        selected_mode = "Account"
+        self._selected_expert_auth_mode = "Account"
+        self.config.expert_auth_mode = "Account"
 
         try:
             self.config = parse_config_excel(file_path, self.config)
+            # Defensive re-apply in case a legacy parser/template mutates config.
+            self.config.expert_auth_mode = "Account"
             self.update_matrix_blueprint()
             self.update_preview_factors()
             self.update_preview_scales()
@@ -425,8 +453,10 @@ class TabConfig(QWidget):
         self.rb_category.setChecked(config.scale_type != "Continuous")
         self.spin_min.setText(str(config.continuous_min))
         self.spin_max.setText(str(config.continuous_max))
-        self.rb_expert_free.setChecked(config.expert_auth_mode == "Free")
-        self.rb_expert_account.setChecked(config.expert_auth_mode != "Free")
+        self._selected_expert_auth_mode = "Account"
+        self.config.expert_auth_mode = "Account"
+        self.rb_expert_free.setChecked(False)
+        self.rb_expert_account.setChecked(True)
         self.txt_file_path.setText("Configuration stored inside project (.mcdm)")
         self.update_preview_factors()
         self.update_preview_scales()
@@ -441,6 +471,7 @@ class TabConfig(QWidget):
         self.cb_model.setCurrentText("DEMATEL")
         self.chk_z_number.setChecked(False)
         self.rb_category.setChecked(True)
+        self._selected_expert_auth_mode = "Account"
         self.rb_expert_account.setChecked(True)
         self.spin_min.setText("0")
         self.spin_max.setText("10")
@@ -456,7 +487,16 @@ class TabConfig(QWidget):
             )
             return
 
+        # V4.7: MCDM always requires the predefined expert roster.
+        self._selected_expert_auth_mode = "Account"
         self.reload_excel_data()
+        self.config.expert_auth_mode = "Account"
+        if not self.config.experts:
+            QMessageBox.warning(
+                self, "Missing Expert Roster",
+                "MCDM requires at least one expert account. Please add experts to the Excel 'Experts' sheet."
+            )
+            return
 
         if not self.config.factors:
             QMessageBox.warning(
