@@ -50,6 +50,11 @@ def config_to_dict(config: ProjectConfig) -> Dict[str, Any]:
     # project's identity. Keep it out of persisted configuration so projects
     # created from the same template at different paths can still be merged.
     data.pop("excel_path", None)
+    # V4.8: Continuous MCDM was removed. These legacy fields must not affect
+    # persistence, config hashes, or merge compatibility for new projects.
+    data.pop("continuous_min", None)
+    data.pop("continuous_max", None)
+    data["scale_type"] = "Category"
     return data
 
 
@@ -81,11 +86,17 @@ def _expert_from_dict(data: Dict[str, Any]) -> Expert:
 
 
 def config_from_dict(data: Dict[str, Any]) -> ProjectConfig:
-    """Rebuild a ProjectConfig from project_db.config_json."""
+    """Rebuild a ProjectConfig from project_db.config_json.
+
+    V4.8 no longer supports legacy Continuous MCDM projects. We reject them
+    explicitly instead of silently converting their meaning.
+    """
+    if str(data.get("scale_type", "Category")).lower() == "continuous":
+        raise ValueError("This project uses the legacy Continuous MCDM scale, which is not supported in V4.8. Please open it with V4.7.x or recreate it using a linguistic scale.")
     return ProjectConfig(
         model_type=str(data.get("model_type", "DEMATEL")),
         use_z_number=bool(data.get("use_z_number", False)),
-        scale_type=str(data.get("scale_type", "Category")),
+        scale_type="Category",
         continuous_min=float(data.get("continuous_min", 0.0)),
         continuous_max=float(data.get("continuous_max", 10.0)),
         expert_auth_mode=str(data.get("expert_auth_mode", "Account")),

@@ -483,6 +483,41 @@ class TabSurvey(QWidget):
         self.table_matrix.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table_matrix.verticalHeader().setDefaultSectionSize(40)
 
+        # Continuous AHP: show the actual reciprocal immediately in the locked
+        # lower triangle as the expert types the upper-triangle value.
+        if model == "AHP" and self.config.scale_type == "Continuous":
+            for (i, j), widget in self.cell_widgets.items():
+                widget.valueChanged.connect(lambda i=i, j=j: self._update_ahp_reciprocal(i, j))
+                self._update_ahp_reciprocal(i, j)
+
+    def _update_ahp_reciprocal(self, i: int, j: int):
+        if not self.config or self.config.model_type != "AHP" or i >= j:
+            return
+        widget = self.cell_widgets.get((i, j))
+        value = widget.numeric_value() if widget else None
+        item = self.table_matrix.item(j, i)
+        if item is None:
+            return
+        if value is None:
+            item.setText("1/(a_ji)")
+        elif value <= 0:
+            item.setText("Invalid (must > 0)")
+        else:
+            reciprocal = 1.0 / value
+            item.setText(f"{reciprocal:.8g}")
+
+    def _validate_matrix_inputs(self) -> bool:
+        if not self.config or self.config.scale_type != "Continuous":
+            return True
+        for (r, c), widget in self.cell_widgets.items():
+            ok, message = widget.validate_input(strictly_positive=(self.config.model_type == "AHP"))
+            if not ok:
+                self.table_matrix.setCurrentCell(r, c)
+                QMessageBox.warning(self, "Invalid Continuous Value",
+                                    f"Cell [{self.row_labels[r]} → {self.col_labels[c]}]: {message}")
+                return False
+        return True
+
     # =========================================================================
     # XÁC THỰC MẬT KHẨU & CHUYỂN NGƯỜI (TỰ ĐỘNG REFRESH)
     # =========================================================================
@@ -611,6 +646,9 @@ class TabSurvey(QWidget):
             QMessageBox.critical(self, "Save Failed", "The selected expert account no longer exists in this project. Refresh the project and try again.")
             return
 
+        if not self._validate_matrix_inputs():
+            return
+
         r_len, c_len = len(self.row_labels), len(self.col_labels)
         code_mat = [["" for _ in range(c_len)] for _ in range(r_len)]
         val_mat = [["" for _ in range(c_len)] for _ in range(r_len)]
@@ -625,6 +663,16 @@ class TabSurvey(QWidget):
                     txt = item.text() if item else ""
                     code_mat[r][c] = txt
                     val_mat[r][c] = txt
+
+        if self.config.model_type == "AHP" and self.config.scale_type == "Continuous":
+            for r in range(r_len):
+                code_mat[r][r] = val_mat[r][r] = "1"
+                for c in range(r + 1, c_len):
+                    upper = float(code_mat[r][c])
+                    reciprocal = 1.0 / upper
+                    reciprocal_text = f"{reciprocal:.12g}"
+                    code_mat[c][r] = reciprocal_text
+                    val_mat[c][r] = reciprocal_text
 
         existed = self.project_db.get_response_by_respondent(respondent_id) is not None
         self.project_db.save_response(respondent_id=respondent_id, response_data={"code_matrix": code_mat, "value_matrix": val_mat})

@@ -2,11 +2,11 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QComboBox, QCheckBox, QRadioButton, QButtonGroup,
-    QLineEdit, QPushButton, QFileDialog, QMessageBox, QDoubleSpinBox,
+    QLineEdit, QPushButton, QFileDialog, QMessageBox,
     QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QInputDialog
 )
 from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtGui import QColor, QBrush, QFont, QDoubleValidator
+from PyQt6.QtGui import QColor, QBrush, QFont
 from core.models import ProjectConfig, config_to_dict
 from core.excel_handler import parse_config_excel, generate_default_template
 
@@ -52,39 +52,17 @@ class TabConfig(QWidget):
         lay_model.addWidget(self.chk_z_number, 1, 0, 1, 2)
         left_layout.addWidget(grp_model)
 
-        # 2. Scale Configuration
+        # 2. Scale Configuration — V4.8: MCDM uses linguistic/categorical scales only.
         grp_scale = QGroupBox("2. Scale Configuration")
-        lay_scale = QGridLayout(grp_scale)
-
-        self.rb_category = QRadioButton("Categorical (Linguistic: VL, L, M, H, VH)")
-        self.rb_continuous = QRadioButton("Continuous (Numerical: Slider / Direct input)")
-        self.rb_category.setChecked(True)
-
-        self.btn_group_scale = QButtonGroup(self)
-        self.btn_group_scale.addButton(self.rb_category)
-        self.btn_group_scale.addButton(self.rb_continuous)
-
-        lay_scale.addWidget(self.rb_category, 0, 0, 1, 4)
-        lay_scale.addWidget(self.rb_continuous, 1, 0, 1, 4)
-
-        self.lbl_min = QLabel("Min:")
-        self.spin_min = QLineEdit("0")
-        self.spin_min.setValidator(QDoubleValidator(-1000000000, 1000000000, 8, self))
-        self.spin_min.setPlaceholderText("Enter minimum")
-        self.spin_min.textChanged.connect(self.update_preview_scales)
-
-        self.lbl_max = QLabel("Max:")
-        self.spin_max = QLineEdit("10")
-        self.spin_max.setValidator(QDoubleValidator(-1000000000, 1000000000, 8, self))
-        self.spin_max.setPlaceholderText("Enter maximum")
-        self.spin_max.textChanged.connect(self.update_preview_scales)
-
-        lay_scale.addWidget(self.lbl_min, 2, 0)
-        lay_scale.addWidget(self.spin_min, 2, 1)
-        lay_scale.addWidget(self.lbl_max, 2, 2)
-        lay_scale.addWidget(self.spin_max, 2, 3)
-
-        self.rb_category.toggled.connect(self.on_scale_type_toggled)
+        lay_scale = QVBoxLayout(grp_scale)
+        self.lbl_scale_mode = QLabel("Linguistic / Categorical Scale (configured in the Excel template)")
+        self.lbl_scale_mode.setStyleSheet("font-weight:600; color:#0f172a;")
+        lay_scale.addWidget(self.lbl_scale_mode)
+        note_scale = QLabel("Continuous numerical input was removed in V4.8 to keep the MCDM workflow stable and consistent with fuzzy / Z-number linguistic evaluation.")
+        note_scale.setWordWrap(True)
+        note_scale.setStyleSheet("color:#64748b; font-size:11px;")
+        lay_scale.addWidget(note_scale)
+        self._selected_scale_type = "Category"
         left_layout.addWidget(grp_scale)
 
         # 3. Expert Access — V4.7: MCDM always uses a predefined expert roster.
@@ -208,12 +186,15 @@ class TabConfig(QWidget):
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.verticalHeader().setDefaultSectionSize(28)
 
+    def _set_scale_type(self, _scale_type: str = "Category"):
+        """V4.8 compatibility shim: MCDM scale mode is always linguistic/category."""
+        self._selected_scale_type = "Category"
+        self.config.scale_type = "Category"
+        self.on_config_changed()
+
     def on_scale_type_toggled(self):
-        is_continuous = self.rb_continuous.isChecked()
-        self.lbl_min.setEnabled(is_continuous)
-        self.spin_min.setEnabled(is_continuous)
-        self.lbl_max.setEnabled(is_continuous)
-        self.spin_max.setEnabled(is_continuous)
+        self._selected_scale_type = "Category"
+        self.config.scale_type = "Category"
         self.on_config_changed()
 
     def on_z_number_toggled(self):
@@ -266,9 +247,10 @@ class TabConfig(QWidget):
 
         self.config.model_type = self.cb_model.currentText()
         self.config.use_z_number = self.chk_z_number.isChecked()
-        self.config.scale_type = "Continuous" if self.rb_continuous.isChecked() else "Category"
-        self.config.continuous_min = float(self.spin_min.text() or 0)
-        self.config.continuous_max = float(self.spin_max.text() or 10)
+        # V4.8: MCDM supports linguistic/categorical evaluation only.
+        selected_scale_type = "Category"
+        self._selected_scale_type = "Category"
+        self.config.scale_type = "Category"
         # UI selection is authoritative. Excel supplies factors/scales/roster,
         # never the respondent access mode.
         selected_mode = "Account"
@@ -277,7 +259,9 @@ class TabConfig(QWidget):
 
         try:
             self.config = parse_config_excel(file_path, self.config)
-            # Defensive re-apply in case a legacy parser/template mutates config.
+            # Defensive re-apply: Excel supplies research entities/scales/roster,
+            # but must never override the scale mode selected in the UI.
+            self.config.scale_type = "Category"
             self.config.expert_auth_mode = "Account"
             self.update_matrix_blueprint()
             self.update_preview_factors()
@@ -386,15 +370,6 @@ class TabConfig(QWidget):
             self.table_factors.setItem(row_idx, 3, QTableWidgetItem(desc))
 
     def update_preview_scales(self):
-        if self.config.scale_type == "Continuous":
-            self.table_scales.setRowCount(1)
-            self.table_scales.setColumnCount(3)
-            self.table_scales.setHorizontalHeaderLabels(["Scale Type", "Lower Bound (Min)", "Upper Bound (Max)"])
-            self.table_scales.setItem(0, 0, QTableWidgetItem("Continuous Scale"))
-            self.table_scales.setItem(0, 1, QTableWidgetItem(self.spin_min.text()))
-            self.table_scales.setItem(0, 2, QTableWidgetItem(self.spin_max.text()))
-            return
-
         if not self.config.use_z_number:
             scales = self.config.standard_scales
             self.table_scales.setRowCount(len(scales))
@@ -447,12 +422,10 @@ class TabConfig(QWidget):
     def load_locked_project(self, config: ProjectConfig):
         """Display a stored project configuration without allowing re-import/editing."""
         self.config = config
+        self._selected_scale_type = "Category"
+        self.config.scale_type = "Category"
         self.cb_model.setCurrentText(config.model_type)
         self.chk_z_number.setChecked(config.use_z_number)
-        self.rb_continuous.setChecked(config.scale_type == "Continuous")
-        self.rb_category.setChecked(config.scale_type != "Continuous")
-        self.spin_min.setText(str(config.continuous_min))
-        self.spin_max.setText(str(config.continuous_max))
         self._selected_expert_auth_mode = "Account"
         self.config.expert_auth_mode = "Account"
         self.rb_expert_free.setChecked(False)
@@ -470,11 +443,9 @@ class TabConfig(QWidget):
         self.config = ProjectConfig()
         self.cb_model.setCurrentText("DEMATEL")
         self.chk_z_number.setChecked(False)
-        self.rb_category.setChecked(True)
+        self._selected_scale_type = "Category"
         self._selected_expert_auth_mode = "Account"
         self.rb_expert_account.setChecked(True)
-        self.spin_min.setText("0")
-        self.spin_max.setText("10")
         self.load_and_preview_default()
 
     def on_start_clicked(self):
@@ -487,9 +458,14 @@ class TabConfig(QWidget):
             )
             return
 
+        # V4.8: MCDM scale mode is fixed to linguistic/category.
+        selected_scale_type = "Category"
+
         # V4.7: MCDM always requires the predefined expert roster.
         self._selected_expert_auth_mode = "Account"
+        self._selected_scale_type = selected_scale_type
         self.reload_excel_data()
+        self.config.scale_type = selected_scale_type
         self.config.expert_auth_mode = "Account"
         if not self.config.experts:
             QMessageBox.warning(
